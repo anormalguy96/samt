@@ -34,17 +34,10 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
             </svg>
           </div>
           <div>
-            <div className="text-[10px] font-mono text-cyan-primary/80 tracking-wider uppercase">
-              AZƏRBAYCAN DÖVLƏT SU EHTİYATLARI AGENTLİYİ (ADSEA) · HÖKUMƏT BULUDU
-            </div>
             <div className="flex items-center gap-2 mt-0.5">
               <h1 className="text-lg font-bold font-sans tracking-tight text-slate-100">
                 SAMT
               </h1>
-              <Badge variant="info">v1.0.1 · MILESTONE 2</Badge>
-              <span className="hidden sm:inline text-xs text-slate-400 font-sans">
-                · Su Əməliyyatlarının Mərkəzləşdirilmiş Təhlili
-              </span>
             </div>
           </div>
         </div>
