@@ -1,0 +1,530 @@
+openapi: 3.0.3
+info:
+  title: SAMT Core Water Operations & Allocation API
+  description: >
+    Proposed RESTful contract for SAMT (Centralized Water Operations Analytics).
+    Governs edge batch ingestion, 15-minute hydraulic mass balancing, nocturnal
+    Minimum Night Flow (MNF) analytics, incident lifecycle management, and constrained
+    agricultural water allocation.
+  version: 1.0.1
+  contact:
+    name: SƏMT System Architecture Group
+    email: architecture@semt.gov.az
+
+servers:
+  - url: https://api.semt.gov.az/v1
+    description: Proposed Sovereign Government Cloud (Hökumət Buludu) Gateway
+  - url: http://localhost:8080/v1
+    description: Local Prototype Mock Server
+
+paths:
+  /telemetry/batch:
+    post:
+      summary: Ingest batched edge sensor readings
+      description: >
+        Receives batched observations from District Metered Area (DMA) edge loggers.
+        Enforces clock-drift checks (|t_batch - t_server| <= 15 min unless historical replay flag is set),
+        validates meter identity in registry, and stores records for downstream mass balancing.
+      operationId: ingestTelemetryBatch
+      security:
+        - BearerAuth: []
+        - MutualTLS: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TelemetryBatchRequest'
+      responses:
+        '202':
+          description: Batch accepted for asynchronous stream processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchIngestResponse'
+        '400':
+          description: Invalid payload structure or out-of-bounds parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or untrusted client certificate / bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Severe clock skew or duplicate batch identifier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /dma/{dma_id}/balance:
+    get:
+      summary: Retrieve 15-minute hydraulic mass balance for a DMA
+      description: >
+        Computes boundary mass balance (Inflow - Outflow - Authorized Consumption - Storage Delta)
+        over the specified rolling window. Preserves signed residuals and data coverage estimates.
+      operationId: getDmaMassBalance
+      parameters:
+        - name: dma_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[A-Z0-9_-]{4,32}$'
+            example: "DMA-YASAMAL-04"
+        - name: window_hours
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 720
+            default: 24
+      responses:
+        '200':
+          description: Mass balance calculation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DmaBalanceResponse'
+        '404':
+          description: DMA not found in network topology
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Upstream storage replica lag or insufficient coverage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /dma/{dma_id}/night-flow:
+    get:
+      summary: Retrieve nocturnal Minimum Night Flow (MNF) analysis
+      description: >
+        Analyzes flow readings strictly within the Asia/Baku [02:00, 04:00) window.
+        Calculates 5th-percentile night flow against historical dry-weather baseline.
+      operationId: getDmaNightFlow
+      parameters:
+        - name: dma_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "DMA-YASAMAL-04"
+        - name: date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+            example: "2026-10-20"
+      responses:
+        '200':
+          description: MNF evaluation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NightFlowResponse'
+        '404':
+          description: DMA not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /allocation/solve:
+    post:
+      summary: Execute constrained regional water allocation
+      description: >
+        Computes a deterministic progressive-filling allocation plan across agricultural
+        and municipal consumers subject to canal capacity and available reservoir supply.
+      operationId: solveAllocation
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AllocationSolveRequest'
+      responses:
+        '200':
+          description: Feasible allocation plan computed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AllocationSolveResponse'
+        '400':
+          description: Negative supply or invalid consumer parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Infeasible minimum requirements
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /incidents:
+    get:
+      summary: List registered leak incidents
+      operationId: listIncidents
+      parameters:
+        - name: dma_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [DETECTED, ASSIGNED, IN_REPAIR, REPAIRED, VERIFIED, CLOSED, FALSE_ALARM]
+      responses:
+        '200':
+          description: List of leak incidents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/IncidentResponse'
+
+  /incidents/{incident_id}/transition:
+    post:
+      summary: Execute guarded incident state machine transition
+      operationId: transitionIncident
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: incident_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransitionRequest'
+      responses:
+        '200':
+          description: State transition accepted and committed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentResponse'
+        '400':
+          description: Transition guard violation (missing evidence or invalid state)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Incident not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: State Water Resources Agency (ADSEA) authorized dispatcher JWT
+    MutualTLS:
+      type: mutualTLS
+      description: Hardware edge device Mutual TLS 1.3 client certificate
+
+  schemas:
+    TelemetryBatchRequest:
+      type: object
+      required:
+        - gateway_id
+        - batch_timestamp
+        - measurements
+      properties:
+        gateway_id:
+          type: string
+          example: "GW-AZ-BAKU-YAS-008"
+        batch_timestamp:
+          type: string
+          format: date-time
+        is_historical_replay:
+          type: boolean
+          default: false
+        measurements:
+          type: array
+          minItems: 1
+          maxItems: 60
+          items:
+            $ref: '#/components/schemas/SensorMeasurement'
+
+    SensorMeasurement:
+      type: object
+      required:
+        - observation_id
+        - meter_id
+        - dma_id
+        - metric
+        - value
+        - observed_at
+      properties:
+        observation_id:
+          type: string
+          example: "obs-20261020-001"
+        meter_id:
+          type: string
+          example: "FM-YAS-INLET-01"
+        dma_id:
+          type: string
+          example: "DMA-YASAMAL-04"
+        metric:
+          type: string
+          enum: [FLOW_M3H, PRESSURE_BAR, LEVEL_METERS]
+        value:
+          type: number
+          minimum: 0.0
+          example: 412.5
+        observed_at:
+          type: string
+          format: date-time
+        battery_volts:
+          type: number
+          minimum: 0.0
+          maximum: 5.0
+          example: 3.4
+
+    BatchIngestResponse:
+      type: object
+      required:
+        - status
+        - processed_count
+        - correlation_id
+      properties:
+        status:
+          type: string
+          enum: [ACCEPTED, PARTIALLY_ACCEPTED, QUARANTINED]
+        processed_count:
+          type: integer
+          example: 16
+        correlation_id:
+          type: string
+          example: "cor-20261020-88412"
+
+    DmaBalanceResponse:
+      type: object
+      required:
+        - dma_id
+        - window_start
+        - window_end
+        - total_inflow_m3
+        - total_outflow_m3
+        - signed_residual_m3
+        - coverage_ratio
+        - status
+      properties:
+        dma_id:
+          type: string
+          example: "DMA-YASAMAL-04"
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+        total_inflow_m3:
+          type: number
+          example: 103.1
+        total_outflow_m3:
+          type: number
+          example: 67.0
+        signed_residual_m3:
+          type: number
+          example: 36.1
+        coverage_ratio:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+          example: 0.98
+        uncertainty_m3:
+          type: number
+          example: 2.4
+        status:
+          type: string
+          enum: [NOMINAL, ELEVATED_LOSS, CRITICAL_LEAK, INSUFFICIENT_DATA]
+
+    NightFlowResponse:
+      type: object
+      required:
+        - dma_id
+        - is_within_night_window
+        - percentile_5_flow_m3h
+        - baseline_mnf_m3h
+        - excess_night_flow_m3h
+        - is_anomaly_detected
+      properties:
+        dma_id:
+          type: string
+        is_within_night_window:
+          type: boolean
+        sample_count:
+          type: integer
+        percentile_5_flow_m3h:
+          type: number
+        baseline_mnf_m3h:
+          type: number
+        excess_night_flow_m3h:
+          type: number
+        is_anomaly_detected:
+          type: boolean
+        detection_reason:
+          type: string
+
+    AllocationSolveRequest:
+      type: object
+      required:
+        - region_id
+        - available_water_m3
+        - canal_network_id
+        - consumers
+      properties:
+        region_id:
+          type: string
+          example: "REG-KUR-ARAS-03"
+        canal_network_id:
+          type: string
+          example: "CANAL-NET-SHIRVAN-01"
+        available_water_m3:
+          type: number
+          minimum: 0.0
+          example: 610.0
+        consumers:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - name
+              - demand_m3
+              - priority_weight
+              - canal_capacity_m3
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              demand_m3:
+                type: number
+                minimum: 0.0
+              priority_weight:
+                type: number
+                minimum: 0.0
+                maximum: 1.0
+              canal_capacity_m3:
+                type: number
+                minimum: 0.0
+              minimum_survival_m3:
+                type: number
+                minimum: 0.0
+
+    AllocationSolveResponse:
+      type: object
+      required:
+        - total_supply_m3
+        - total_allocated_m3
+        - unmet_demand_m3
+        - gini_index
+        - allocations
+      properties:
+        total_supply_m3:
+          type: number
+        total_allocated_m3:
+          type: number
+        unmet_demand_m3:
+          type: number
+        residual_supply_m3:
+          type: number
+        gini_index:
+          type: number
+        allocations:
+          type: array
+          items:
+            type: object
+            properties:
+              consumer_id:
+                type: string
+              allocated_m3:
+                type: number
+              satisfaction_pct:
+                type: number
+              reason_code:
+                type: string
+
+    IncidentResponse:
+      type: object
+      required:
+        - incident_id
+        - dma_id
+        - state
+        - severity
+        - estimated_loss_m3h
+        - version
+      properties:
+        incident_id:
+          type: string
+        dma_id:
+          type: string
+        pipe_segment_id:
+          type: string
+        title:
+          type: string
+        state:
+          type: string
+          enum: [DETECTED, ASSIGNED, IN_REPAIR, REPAIRED, VERIFIED, CLOSED, FALSE_ALARM]
+        severity:
+          type: string
+          enum: [LOW, MEDIUM, CRITICAL, EMERGENCY]
+        estimated_loss_m3h:
+          type: number
+        version:
+          type: integer
+
+    TransitionRequest:
+      type: object
+      required:
+        - event_type
+      properties:
+        event_type:
+          type: string
+          enum: [ASSIGN, MARK_FALSE_ALARM, START_REPAIR, RECORD_REPAIR_EVIDENCE, EVALUATE_VERIFICATION, CLOSE]
+        payload:
+          type: object
+
+    ErrorResponse:
+      type: object
+      required:
+        - error_code
+        - message
+      properties:
+        error_code:
+          type: string
+          example: "GUARD_VIOLATION"
+        message:
+          type: string
+        timestamp:
+          type: string
+          format: date-time

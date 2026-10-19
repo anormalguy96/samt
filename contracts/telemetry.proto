@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package semt.telemetry.v1;
+
+option go_package = "semt/gen/telemetry/v1;telemetryv1";
+option java_package = "az.gov.semt.telemetry.v1";
+option java_multiple_files = true;
+
+// Proposed binary telemetry service for edge-to-cloud cellular loggers.
+// Grounded in Lecture 3 (Formal Interfaces) & Lecture 6 (Interoperability).
+service TelemetryIngestionService {
+  // Client-streaming RPC: Edge device streams a sequence of batches or bursts,
+  // receiving a final comprehensive ingestion summary upon stream completion.
+  rpc IngestTelemetryStream (stream IngestStreamRequest) returns (IngestStreamResponse);
+
+  // Unary batch RPC: Edge logger delivers an authenticated batch of measurements.
+  rpc IngestBatch (TelemetryBatch) returns (IngestBatchResponse);
+}
+
+enum MetricType {
+  METRIC_TYPE_UNSPECIFIED = 0;
+  METRIC_TYPE_FLOW_M3H = 1;
+  METRIC_TYPE_PRESSURE_BAR = 2;
+  METRIC_TYPE_LEVEL_METERS = 3;
+}
+
+enum QualityFlag {
+  QUALITY_FLAG_VALID = 0;
+  QUALITY_FLAG_SUSPECT_BATTERY = 1;
+  QUALITY_FLAG_SUSPECT_JITTER = 2;
+  QUALITY_FLAG_QUARANTINED_CLOCK_SKEW = 3;
+}
+
+// Single discrete measurement reading.
+// Approximate Protobuf wire format size: ~26-32 bytes per record.
+// (Field 1: 12 B string, Field 2: 8 B varint, Field 3: 1 B enum, Field 4: 8 B double, Field 5: 1 B enum).
+message MetricRecord {
+  string sensor_id = 1;              // Unique meter or transducer identifier (e.g., "FM-YAS-INLET-01")
+  int64 timestamp_unix_epoch_ms = 2; // Device observed time in milliseconds since UTC epoch
+  MetricType metric_type = 3;        // Metric type
+  double value = 4;                  // Observed physical value (m³/h, bar, or meters)
+  QualityFlag quality = 5;           // Local edge quality assessment
+}
+
+// Batched transmission payload from an underground cellular logger.
+// Capacity Analysis Note:
+// A 60-record batch contains 60 * ~28 bytes = ~1,680 bytes of record payload,
+// plus gateway metadata (~120 bytes). Total binary payload size is approximately 1.8 KB
+// (or ~700 bytes with gzip stream compression). The previous claim of a universal
+// sub-120-byte payload for a 60-record batch was mathematically incorrect.
+message TelemetryBatch {
+  string gateway_id = 1;             // Hardware gateway IMEI / MAC / serial
+  string dma_id = 2;                 // District Metered Area association
+  int64 gateway_time_unix_ms = 3;    // Transmission timestamp from gateway clock
+  int64 sequence_id = 4;             // Monotonically increasing logger transmission sequence
+  bool is_historical_replay = 5;     // True if uploaded from local 48h non-volatile buffer post-outage
+  repeated MetricRecord records = 6; // Measurement array (enforced: 1 <= records <= 60)
+  bytes client_signature = 7;        // SHA-256 HMAC or ECDSA signature over payload
+}
+
+message IngestBatchResponse {
+  bool success = 1;
+  int32 processed_count = 2;
+  int32 quarantined_count = 3;
+  int64 ack_sequence_id = 4;
+  string correlation_id = 5;
+  string error_message = 6;
+}
+
+message IngestStreamRequest {
+  int64 stream_sequence = 1;
+  oneof payload {
+    TelemetryBatch batch = 2;
+    MetricRecord high_frequency_burst = 3; // e.g. 50 Hz acoustic or transient reading
+  }
+}
+
+message IngestStreamResponse {
+  int64 total_packets_received = 1;
+  int64 total_records_processed = 2;
+  int64 last_acknowledged_sequence = 3;
+  bool backpressure_warning = 4;
+}
