@@ -2,9 +2,6 @@
 node_modules/
 prototype/node_modules/
 
-# Production build outputs (optional: keep if needed, but standard is ignore)
-prototype/dist/
-
 # Logs
 *.log
 npm-debug.log*
