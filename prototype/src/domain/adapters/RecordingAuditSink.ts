@@ -1,10 +1,11 @@
 /**
  * Recording Audit Sink & Notifier Spy (Lecture 5: Test Doubles & Observability)
- * Records all domain audit events and dispatches in memory.
- * Enables automated test suites to assert that exact expected events were emitted.
+ * Records domain audit events and dispatches in memory for deterministic testing.
  */
 
-import type { AuditEvent, IAuditSink, INotifier } from '../ports/AuditPort';
+import type { AuditEvent, IAuditSink, INotifier } from '../ports/AuditPort.js';
+import type { Clock } from '../ports/Clock.js';
+import { SystemClock } from '../ports/Clock.js';
 
 export interface RecordedNotification {
   recipient: string;
@@ -17,16 +18,26 @@ export class RecordingAuditSink implements IAuditSink, INotifier {
   private events: AuditEvent[] = [];
   private notifications: RecordedNotification[] = [];
 
+  constructor(private clock: Clock = new SystemClock()) {}
+
   record(event: AuditEvent): void {
-    this.events.push({ ...event });
+    this.events.push({
+      ...event,
+      timestamp: new Date(event.timestamp.getTime()),
+      metadata: event.metadata ? structuredClone(event.metadata) : undefined,
+    });
   }
 
   getEvents(): AuditEvent[] {
-    return [...this.events];
+    return this.events.map((e) => ({
+      ...e,
+      timestamp: new Date(e.timestamp.getTime()),
+      metadata: e.metadata ? structuredClone(e.metadata) : undefined,
+    }));
   }
 
   getEventsByType(eventType: string): AuditEvent[] {
-    return this.events.filter((e) => e.eventType === eventType);
+    return this.getEvents().filter((e) => e.eventType === eventType);
   }
 
   async notify(
@@ -38,13 +49,16 @@ export class RecordingAuditSink implements IAuditSink, INotifier {
       recipient,
       message,
       severity,
-      timestamp: new Date(),
+      timestamp: this.clock.now(),
     });
     return true;
   }
 
   getNotifications(): RecordedNotification[] {
-    return [...this.notifications];
+    return this.notifications.map((n) => ({
+      ...n,
+      timestamp: new Date(n.timestamp.getTime()),
+    }));
   }
 
   clear(): void {

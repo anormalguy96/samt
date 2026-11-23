@@ -1,19 +1,22 @@
 syntax = "proto3";
 
-package semt.telemetry.v1;
+package samt.telemetry.v1;
 
-option go_package = "semt/gen/telemetry/v1;telemetryv1";
-option java_package = "az.gov.semt.telemetry.v1";
+option go_package = "samt/gen/telemetry/v1;telemetryv1";
+option java_package = "az.samt.telemetry.v1";
 option java_multiple_files = true;
 
-// Proposed binary telemetry service for edge-to-cloud cellular loggers.
-// Grounded in Lecture 3 (Formal Interfaces) & Lecture 6 (Interoperability).
+// SAMT v1.1.0 Telemetry Protobuf Contract (CONTRACT-ONLY in v1.1.0).
+// Runtime transport in v1.1.0 uses HTTP/JSON (`POST /v1/telemetry/batch`);
+// this schema is compiled via `protoc` and aligned with the implemented domain
+// ingestion rules for future binary edge-gateway transport compatibility.
+//
+// RPC Semantics Note:
+// - `IngestTelemetryStream` is a CLIENT-STREAMING RPC (multiple client frames,
+//   one final `IngestStreamResponse` summary upon stream close — NOT bidirectional).
+// - `IngestBatch` is a unary RPC for a single bounded batch (1..500 records).
 service TelemetryIngestionService {
-  // Client-streaming RPC: Edge device streams a sequence of batches or bursts,
-  // receiving a final comprehensive ingestion summary upon stream completion.
   rpc IngestTelemetryStream (stream IngestStreamRequest) returns (IngestStreamResponse);
-
-  // Unary batch RPC: Edge logger delivers an authenticated batch of measurements.
   rpc IngestBatch (TelemetryBatch) returns (IngestBatchResponse);
 }
 
@@ -24,60 +27,96 @@ enum MetricType {
   METRIC_TYPE_LEVEL_METERS = 3;
 }
 
-enum QualityFlag {
-  QUALITY_FLAG_VALID = 0;
-  QUALITY_FLAG_SUSPECT_BATTERY = 1;
-  QUALITY_FLAG_SUSPECT_JITTER = 2;
-  QUALITY_FLAG_QUARANTINED_CLOCK_SKEW = 3;
+enum CanonicalUnit {
+  CANONICAL_UNIT_UNSPECIFIED = 0;
+  CANONICAL_UNIT_M3_PER_HOUR = 1;
+  CANONICAL_UNIT_BAR = 2;
+  CANONICAL_UNIT_METERS = 3;
 }
 
-// Single discrete measurement reading.
-// Approximate Protobuf wire format size: ~26-32 bytes per record.
-// (Field 1: 12 B string, Field 2: 8 B varint, Field 3: 1 B enum, Field 4: 8 B double, Field 5: 1 B enum).
+enum ObservationQuality {
+  OBSERVATION_QUALITY_UNSPECIFIED = 0;
+  OBSERVATION_QUALITY_VALID = 1;
+  OBSERVATION_QUALITY_SUSPECT = 2;
+  OBSERVATION_QUALITY_QUARANTINED = 3;
+  OBSERVATION_QUALITY_REJECTED = 4;
+}
+
+enum IngestionMode {
+  INGESTION_MODE_UNSPECIFIED = 0;
+  INGESTION_MODE_LIVE = 1;
+  INGESTION_MODE_HISTORICAL_REPLAY = 2;
+}
+
+// Single discrete sensor observation aligned with `TelemetryObservationInput`.
+// Note: Server owns `received_at` and derives live vs. historical policy;
+// caller timestamps cannot bypass server authentication or age limits.
 message MetricRecord {
-  string sensor_id = 1;              // Unique meter or transducer identifier (e.g., "FM-YAS-INLET-01")
-  int64 timestamp_unix_epoch_ms = 2; // Device observed time in milliseconds since UTC epoch
-  MetricType metric_type = 3;        // Metric type
-  double value = 4;                  // Observed physical value (m³/h, bar, or meters)
-  QualityFlag quality = 5;           // Local edge quality assessment
+  string observation_id = 1;          // Unique per meter for durable deduplication
+  string meter_id = 2;                // Registered active meter ID (e.g., "FM-YAS-INLET-01")
+  string dma_id = 3;                  // Bound DMA ID (must match registry binding)
+  int64 observed_at_unix_ms = 4;      // Sensor measurement timestamp (UTC ms)
+  MetricType metric_type = 5;         // Must be compatible with meter_role
+  CanonicalUnit canonical_unit = 6;   // Must match canonical unit for metric_type
+  double value = 7;                   // Finite non-negative physical value
+  double battery_volts = 8;           // Optional battery voltage (< 3.0V -> SUSPECT)
+  ObservationQuality local_quality = 9;
 }
 
-// Batched transmission payload from an underground cellular logger.
-// Capacity Analysis Note:
-// A 60-record batch contains 60 * ~28 bytes = ~1,680 bytes of record payload,
-// plus gateway metadata (~120 bytes). Total binary payload size is approximately 1.8 KB
-// (or ~700 bytes with gzip stream compression). The previous claim of a universal
-// sub-120-byte payload for a 60-record batch was mathematically incorrect.
+// Bounded edge transmission batch (1 <= records <= 500).
+// Measured wire size from encoding named fixture `yasamal_dma04_60_records_15s_window`
+// (60 records, 15s spacing) via `scripts/validate-contracts.mjs`:
+//   - Raw Protobuf wire format : 5,319 bytes (88.65 bytes/record average)
+//   - Gzip-compressed Protobuf : 631 bytes
+//   - Equivalent raw JSON      : 12,720 bytes
 message TelemetryBatch {
-  string gateway_id = 1;             // Hardware gateway IMEI / MAC / serial
-  string dma_id = 2;                 // District Metered Area association
-  int64 gateway_time_unix_ms = 3;    // Transmission timestamp from gateway clock
-  int64 sequence_id = 4;             // Monotonically increasing logger transmission sequence
-  bool is_historical_replay = 5;     // True if uploaded from local 48h non-volatile buffer post-outage
-  repeated MetricRecord records = 6; // Measurement array (enforced: 1 <= records <= 60)
-  bytes client_signature = 7;        // SHA-256 HMAC or ECDSA signature over payload
+  string device_id = 1;               // Must match authenticated gateway identity
+  string dma_id = 2;                  // Primary DMA context
+  int64 transmitted_at_unix_ms = 3;   // Gateway transmission clock (subject to drift policy)
+  int64 sequence_id = 4;              // Monotonic gateway transmission counter
+  bool caller_historical_hint = 5;    // Informational hint only; server derives IngestionMode
+  repeated MetricRecord records = 6;
+}
+
+message RecordIngestOutcome {
+  string observation_id = 1;
+  string meter_id = 2;
+  bool accepted = 3;
+  string code = 4;
+  ObservationQuality quality = 5;
+  IngestionMode ingestion_mode = 6;
+  string reason = 7;
 }
 
 message IngestBatchResponse {
-  bool success = 1;
-  int32 processed_count = 2;
-  int32 quarantined_count = 3;
-  int64 ack_sequence_id = 4;
-  string correlation_id = 5;
-  string error_message = 6;
+  string status = 1;                  // ACCEPTED | PARTIALLY_ACCEPTED | DUPLICATE_ONLY | REJECTED
+  string correlation_id = 2;
+  int64 received_at_unix_ms = 3;      // Server-owned arrival timestamp
+  int32 total_count = 4;
+  int32 accepted_count = 5;
+  int32 live_count = 6;
+  int32 historical_count = 7;
+  int32 duplicate_count = 8;
+  int32 quarantined_count = 9;
+  int32 rejected_count = 10;
+  bool triggered_live_dispatch = 11;
+  repeated RecordIngestOutcome results = 12;
 }
 
 message IngestStreamRequest {
   int64 stream_sequence = 1;
   oneof payload {
     TelemetryBatch batch = 2;
-    MetricRecord high_frequency_burst = 3; // e.g. 50 Hz acoustic or transient reading
+    MetricRecord high_frequency_burst = 3;
   }
 }
 
 message IngestStreamResponse {
-  int64 total_packets_received = 1;
-  int64 total_records_processed = 2;
-  int64 last_acknowledged_sequence = 3;
-  bool backpressure_warning = 4;
+  int64 total_frames_received = 1;
+  int64 total_records_accepted = 2;
+  int64 total_records_duplicate = 3;
+  int64 total_records_quarantined = 4;
+  int64 total_records_rejected = 5;
+  int64 last_received_sequence = 6;
+  string correlation_id = 7;
 }

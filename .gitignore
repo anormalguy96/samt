@@ -1,6 +1,13 @@
 # Dependencies
 node_modules/
 prototype/node_modules/
+server/node_modules/
+
+# Build & drill artifacts
+server/dist/
+*.dump
+*.sql.bak
+tmp/
 
 # Logs
 *.log

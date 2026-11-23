@@ -13,6 +13,11 @@ export interface MnfDiurnalChartProps {
     tankRefillChattering: number;
     netPhysicalLoss: number;
     nrwNightSharePct: number;
+    sampleCount?: number;
+    coverageRatio?: number;
+    status?: string;
+    sourceDateAzt?: string;
+    isPersisted?: boolean;
   };
   hasBurstAnomaly: boolean;
   onToggleBurstAnomaly: (val: boolean) => void;

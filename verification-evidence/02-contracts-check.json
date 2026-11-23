@@ -1,0 +1,44 @@
+
+> samt-monorepo@1.1.0 contracts:check
+> node scripts/validate-contracts.mjs
+
+{
+  "checkedAt": "2026-11-23T10:29:43.481Z",
+  "openApi": {
+    "openapi": "3.1.0",
+    "version": "1.1.0",
+    "routeCount": 13,
+    "routes": [
+      "/dmas",
+      "/telemetry/batch",
+      "/dma/{dma_id}/balance",
+      "/dma/{dma_id}/night-flow",
+      "/dma/{dma_id}/assess",
+      "/incidents",
+      "/incidents/{incident_id}",
+      "/incidents/{incident_id}/transition",
+      "/allocation/solve",
+      "/savings/estimate",
+      "/audit",
+      "/outbox",
+      "/outbox/dispatch"
+    ],
+    "securitySchemes": [
+      "BearerAuth",
+      "DeviceTokenAuth"
+    ]
+  },
+  "protoCompile": {
+    "compiler": "D:\\github_repos\\water\\server\\node_modules\\grpc-tools\\bin\\protoc.exe",
+    "compilerVersion": "libprotoc 3.19.1",
+    "descriptorBytes": 3041
+  },
+  "fixture": {
+    "fixtureName": "yasamal_dma04_60_records_15s_window",
+    "recordCount": 60,
+    "protobufBytes": 5319,
+    "protobufGzipBytes": 631,
+    "equivalentJsonBytes": 12720,
+    "bytesPerRecordAvg": 88.65
+  }
+}

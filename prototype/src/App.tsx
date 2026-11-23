@@ -20,29 +20,40 @@ import type { TabId } from './types';
 
 const AppContent: React.FC = () => {
   const { lang, setLang, t } = useLanguage();
-  const [activeTab, setActiveTab] = useState<TabId>('tab-gis');
+  const [activeTab, setActiveTab] = useState<TabId>('tab-workorders');
 
   const domain = useDomain();
-  const telemetry = useTelemetryStream();
   const gis = useGisNetwork();
 
   // Keep GIS selected DMA and Domain selected DMA in sync
   useEffect(() => {
     if (gis.selectedDmaId !== domain.selectedDmaId) {
-      domain.setSelectedDmaId(gis.selectedDmaId);
+      gis.setSelectedDmaId(domain.selectedDmaId);
     }
-  }, [gis.selectedDmaId, domain]);
+  }, [domain.selectedDmaId, gis]);
 
   const handleSelectDma = (id: string) => {
     gis.setSelectedDmaId(id);
     domain.setSelectedDmaId(id);
   };
 
-  // Connect MNF calculation directly to domain selected DMA and fault injections
+  // Pass injected clock + persisted API night-flow directly into MNF analysis
   const mnf = useMnfAnalysis({
     dmaId: domain.selectedDmaId,
+    clock: domain.clock,
+    clockTick: domain.clockTick,
     hasBurstAnomaly: domain.hasBurstAnomaly,
     hasTankRefill: domain.hasTankRefill,
+    persistedNightFlow:
+      domain.runtimeMode === 'INTEGRATED_API' ? domain.persistedNightFlow : null,
+  });
+
+  const telemetry = useTelemetryStream({
+    runtimeMode: domain.runtimeMode,
+    apiStatus: domain.apiStatus,
+    balance: domain.persistedBalance,
+    dmaCount: 4,
+    demoSampleCount: mnf.mnfStats.sampleCount,
   });
 
   const activeAnomaliesCount = domain.incidents.filter(
@@ -56,12 +67,12 @@ const AppContent: React.FC = () => {
       t={t}
       activeTab={activeTab}
       onSelectTab={setActiveTab}
-      packetRate={domain.hasCorruptedPacket ? 0 : telemetry.packetRate}
-      totalInflowM3h={telemetry.totalInflowM3h}
-      nrwPercentage={telemetry.nrwPercentage}
+      observedSamples={telemetry.observedSamplesInWindow}
+      totalInflowM3={telemetry.totalInflowM3}
+      residualPct={telemetry.residualPct}
       activeAnomalies={activeAnomaliesCount}
       activeDmas={telemetry.activeDmas}
-      cloudZone={telemetry.cloudZone}
+      environmentLabel={telemetry.environmentLabel}
     >
       {activeTab === 'tab-gis' && (
         <GisCanvasExplorer

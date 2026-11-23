@@ -1,26 +1,36 @@
 /**
  * Illustrative Water Savings Estimator (Lecture 1: GCE & Lecture 2: Quality Attributes)
- * Evaluates physical leakage reduction by normalizing pre-repair baseline flow
- * to post-repair operating pressure using the Torricelli / FAVAD pressure-leakage relationship:
- * 
+ * Models pressure-normalized leakage differences using Torricelli / FAVAD scaling:
+ *
  *   Q_base_normalized = Q_baseline * (P_post / P_baseline)^alpha
  *   Delta_Q_hourly    = Q_base_normalized - Q_post
- * 
- * Regressed Counterexample Fixed:
- * Leakage of 100 m³/h at pressure 4.0 bar vs 50 m³/h at pressure 1.0 bar with alpha = 0.5:
- * Q_norm = 100 * (1.0 / 4.0)^0.5 = 100 * 0.5 = 50 m³/h.
- * Adjusted Savings = 50 - 50 = 0.0 m³/h.
- * Preserves visible negative values when post-repair flow increases.
+ *
+ * SAMT v1.1.0 Hardening:
+ * - Preserves the pressure-only regression: 100 m³/h @ 4.0 bar vs 50 m³/h @ 1.0 bar
+ *   with alpha = 0.5 yields exactly 0.0 m³/h modeled savings.
+ * - Preserves signed negative results without clamping to zero.
+ * - Validates all numeric inputs strictly (rejects negative flow, non-positive pressure,
+ *   non-finite values, alpha outside [0.5, 1.5], negative tariff, non-positive horizon).
+ * - Explicitly labeled as illustrative modeled estimates — NOT field-measured savings
+ *   or formal IPMVP Option B compliance.
  */
 
 export interface SavingsInputs {
-  baselineFlowM3h: number;     // Q_base
-  baselinePressureBar: number; // P_base
-  postRepairFlowM3h: number;   // Q_post
-  postRepairPressureBar: number; // P_post
-  leakageExponent?: number;    // alpha (typically 0.5 for orifice, up to 1.5 for flexible cracks)
-  illustrativeTariffAznM3?: number; // Configurable illustrative reference tariff
-  timeHorizonDays?: number;    // Default: 365 days
+  baselineFlowM3h: number;
+  baselinePressureBar: number;
+  postRepairFlowM3h: number;
+  postRepairPressureBar: number;
+  leakageExponent?: number; // alpha in [0.5, 1.5]
+  illustrativeTariffAznM3?: number;
+  timeHorizonDays?: number;
+}
+
+export class SavingsValidationError extends Error {
+  readonly code = 'SAVINGS_INVALID_INPUT';
+  constructor(message: string) {
+    super(message);
+    this.name = 'SavingsValidationError';
+  }
 }
 
 export interface SavingsResult {
@@ -30,35 +40,60 @@ export interface SavingsResult {
   postRepairPressureBar: number;
   leakageExponent: number;
   normalizedBaselineFlowM3h: number;
-  rawFlowDifferenceM3h: number; // Unadjusted: Q_base - Q_post
-  pressureAdjustedHourlySavingsM3h: number; // Q_base_norm - Q_post (can be negative!)
+  rawFlowDifferenceM3h: number;
+  pressureAdjustedHourlySavingsM3h: number; // Signed; negative values preserved
   dailySavingsM3: number;
   projectedAnnualSavingsM3: number;
   dailyEconomicValueAzn: number;
   projectedAnnualEconomicValueAzn: number;
   illustrativeTariffAznM3: number;
+  timeHorizonDays: number;
+  isModeledReductionPositive: boolean;
+  /** @deprecated Alias retained for backward compatibility; indicates modeled reduction > 1.0 m³/h, NOT field-measured IPMVP verification */
   isLeakReductionVerified: boolean;
   uncertaintyMarginPct: number;
+  modelQualification: string;
   disclaimers: string[];
 }
 
 export function estimateIllustrativeSavings(inputs: SavingsInputs): SavingsResult {
-  const qBase = Math.max(0, Number.isFinite(inputs.baselineFlowM3h) ? inputs.baselineFlowM3h : 0);
-  const pBase = Math.max(0.1, Number.isFinite(inputs.baselinePressureBar) ? inputs.baselinePressureBar : 1.0);
-  const qPost = Math.max(0, Number.isFinite(inputs.postRepairFlowM3h) ? inputs.postRepairFlowM3h : 0);
-  const pPost = Math.max(0.1, Number.isFinite(inputs.postRepairPressureBar) ? inputs.postRepairPressureBar : 1.0);
+  if (!Number.isFinite(inputs.baselineFlowM3h) || inputs.baselineFlowM3h < 0) {
+    throw new SavingsValidationError(`baselineFlowM3h must be finite and >= 0 (received ${inputs.baselineFlowM3h})`);
+  }
+  if (!Number.isFinite(inputs.postRepairFlowM3h) || inputs.postRepairFlowM3h < 0) {
+    throw new SavingsValidationError(`postRepairFlowM3h must be finite and >= 0 (received ${inputs.postRepairFlowM3h})`);
+  }
+  if (!Number.isFinite(inputs.baselinePressureBar) || inputs.baselinePressureBar <= 0) {
+    throw new SavingsValidationError(`baselinePressureBar must be finite and > 0 (received ${inputs.baselinePressureBar})`);
+  }
+  if (!Number.isFinite(inputs.postRepairPressureBar) || inputs.postRepairPressureBar <= 0) {
+    throw new SavingsValidationError(`postRepairPressureBar must be finite and > 0 (received ${inputs.postRepairPressureBar})`);
+  }
 
   const alpha = inputs.leakageExponent ?? 0.5;
-  const tariff = inputs.illustrativeTariffAznM3 ?? 0.40;
-  const days = inputs.timeHorizonDays ?? 365;
+  if (!Number.isFinite(alpha) || alpha < 0.5 || alpha > 1.5) {
+    throw new SavingsValidationError(`leakageExponent (alpha) must lie within [0.5, 1.5] (received ${alpha})`);
+  }
 
-  // 1. Torricelli / FAVAD pressure adjustment of baseline
-  // Normalizing baseline to post-repair pressure condition
+  const tariff = inputs.illustrativeTariffAznM3 ?? 0.4;
+  if (!Number.isFinite(tariff) || tariff < 0) {
+    throw new SavingsValidationError(`illustrativeTariffAznM3 must be finite and >= 0 (received ${tariff})`);
+  }
+
+  const days = inputs.timeHorizonDays ?? 365;
+  if (!Number.isFinite(days) || days <= 0) {
+    throw new SavingsValidationError(`timeHorizonDays must be finite and > 0 (received ${days})`);
+  }
+
+  const qBase = inputs.baselineFlowM3h;
+  const pBase = inputs.baselinePressureBar;
+  const qPost = inputs.postRepairFlowM3h;
+  const pPost = inputs.postRepairPressureBar;
+
   const pressureRatio = pPost / pBase;
   const pressureFactor = Math.pow(pressureRatio, alpha);
   const normalizedBaselineFlowM3h = qBase * pressureFactor;
 
-  // 2. Savings computation (preserved signed!)
   const rawFlowDifferenceM3h = qBase - qPost;
   const pressureAdjustedHourlySavingsM3h = normalizedBaselineFlowM3h - qPost;
 
@@ -68,16 +103,17 @@ export function estimateIllustrativeSavings(inputs: SavingsInputs): SavingsResul
   const dailyEconomicValueAzn = dailySavingsM3 * tariff;
   const projectedAnnualEconomicValueAzn = projectedAnnualSavingsM3 * tariff;
 
-  const isLeakReductionVerified = pressureAdjustedHourlySavingsM3h > 1.0;
-
-  // Uncertainty margin: higher if pressure differential is large
+  const isModeledReductionPositive = pressureAdjustedHourlySavingsM3h > 1.0;
   const uncertaintyMarginPct = Math.min(35, 5 + Math.abs(pBase - pPost) * 4);
 
+  const modelQualification =
+    'Illustrative pressure-normalized leakage model (NOT field-measured water savings and NOT formal IPMVP compliance).';
+
   const disclaimers: string[] = [
-    `Baseline flow normalized from ${pBase.toFixed(1)} bar to ${pPost.toFixed(1)} bar using leakage exponent α = ${alpha.toFixed(2)}`,
-    'Negative savings indicate flow increased after repair or pressure drop was the sole reason for flow reduction',
-    `Tariff rate of ${tariff.toFixed(2)} AZN/m³ is an illustrative reference value, not an authoritative utility cost`,
-    'Annual figures are projections assuming steady operating conditions over a 365-day horizon',
+    `Baseline leakage flow assumed wholly pressure-responsive and normalized from ${pBase.toFixed(2)} bar to ${pPost.toFixed(2)} bar with α = ${alpha.toFixed(2)}`,
+    'Signed negative values are preserved when post-repair flow exceeds pressure-normalized baseline',
+    `Tariff rate (${tariff.toFixed(2)} AZN/m³) is an illustrative valuation input, not an authoritative utility financial tariff`,
+    `Horizon projection assumes steady flow over ${days} days and is not IPMVP-certified field measurement`,
   ];
 
   return {
@@ -94,8 +130,11 @@ export function estimateIllustrativeSavings(inputs: SavingsInputs): SavingsResul
     dailyEconomicValueAzn: parseFloat(dailyEconomicValueAzn.toFixed(2)),
     projectedAnnualEconomicValueAzn: parseFloat(projectedAnnualEconomicValueAzn.toFixed(2)),
     illustrativeTariffAznM3: parseFloat(tariff.toFixed(2)),
-    isLeakReductionVerified,
+    timeHorizonDays: days,
+    isModeledReductionPositive,
+    isLeakReductionVerified: isModeledReductionPositive,
     uncertaintyMarginPct: parseFloat(uncertaintyMarginPct.toFixed(1)),
+    modelQualification,
     disclaimers,
   };
 }

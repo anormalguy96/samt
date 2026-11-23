@@ -1,41 +1,52 @@
-import { useState, useEffect } from 'react';
+/**
+ * Operational Status Summary Hook (SAMT v1.1.0)
+ * Replaces fabricated 40,280 pkt/s random jitter with honest runtime metrics derived from
+ * either the live local PostgreSQL API or explicitly labeled Static Demo mode.
+ */
+
+import type { ApiBalanceResponse } from '../services/apiClient';
+import type { ApiRuntimeStatus, RuntimeMode } from '../context/DomainContext';
 
 export interface TelemetryMetrics {
-  packetRate: number;
-  totalInflowM3h: number;
-  nrwPercentage: number;
-  activeAnomalies: number;
+  observedSamplesInWindow: number;
+  totalInflowM3: number;
+  residualPct: number;
   activeDmas: number;
-  lastUpdated: string;
-  cloudZone: string;
+  environmentLabel: string;
 }
 
-export function useTelemetryStream() {
-  const [metrics, setMetrics] = useState<TelemetryMetrics>({
-    packetRate: 40280,
-    totalInflowM3h: 38450,
-    nrwPercentage: 28.4,
-    activeAnomalies: 3,
-    activeDmas: 150,
-    lastUpdated: new Date().toLocaleTimeString('az-AZ'),
-    cloudZone: 'Zone 3 Core (AzInTelecom)',
-  });
+export function useTelemetryStream(options: {
+  runtimeMode: RuntimeMode;
+  apiStatus: ApiRuntimeStatus;
+  balance: ApiBalanceResponse | null;
+  dmaCount: number;
+  demoSampleCount: number;
+}): TelemetryMetrics {
+  if (options.runtimeMode === 'INTEGRATED_API') {
+    const totalSamples = options.balance
+      ? options.balance.per_meter_integrations.reduce((acc, m) => acc + m.sample_count, 0)
+      : 0;
+    return {
+      observedSamplesInWindow: totalSamples,
+      totalInflowM3: options.balance ? options.balance.total_inflow_m3 : 0,
+      residualPct: options.balance
+        ? Number((options.balance.unexplained_residual_fraction * 100).toFixed(1))
+        : 0,
+      activeDmas: options.dmaCount,
+      environmentLabel:
+        options.apiStatus === 'READY'
+          ? 'Local API + PostgreSQL 16'
+          : options.apiStatus === 'UNAVAILABLE'
+          ? 'API / PostgreSQL Unavailable (503)'
+          : 'Connecting to Local API...',
+    };
+  }
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setMetrics((prev) => {
-        const jitter = Math.floor(Math.random() * 41) - 20;
-        const newRate = Math.min(42000, Math.max(38000, prev.packetRate + jitter));
-        return {
-          ...prev,
-          packetRate: newRate,
-          lastUpdated: new Date().toLocaleTimeString('az-AZ'),
-        };
-      });
-    }, 2000);
-
-    return () => clearInterval(timer);
-  }, []);
-
-  return metrics;
+  return {
+    observedSamplesInWindow: options.demoSampleCount,
+    totalInflowM3: 0,
+    residualPct: 0,
+    activeDmas: 4,
+    environmentLabel: 'Static Demo Mode (Browser Only)',
+  };
 }

@@ -1,0 +1,33 @@
+# Baseline Verification Record (Pre-v1.1.0 Changes)
+
+Date (Asia/Baku): 2026-11-23T13:49:21+04:00
+Baseline Branch: main
+Baseline Commit SHA: 4667e5dc21d5216505e9dbfeb9b4a11634fad158
+Working Tree State Before Branching: M report_2.md (preserved untouched on feat/samt-v1.1.0)
+
+## Runtime & Tooling Inventory
+- Node.js: v22.11.0
+- npm: 11.13.0
+- Docker CLI: 29.8.0 (Docker Desktop installed on Windows; daemon started for v1.1.0 verification)
+- Docker Compose: v5.5.1
+- Python: 3.10.0 (pymupdf/pypdf available for direct PDF citation verification)
+- Google Chrome: installed at C:\Program Files\Google\Chrome\Application\chrome.exe
+- Local psql / pg_dump / protoc / graphify / obsidian in PATH: not installed natively (PostgreSQL client tools run inside postgres:16.4-alpine container; protoc runs via grpc-tools real compiler binary)
+
+## Baseline Checks Executed on prototype/
+1. `npx tsc --noEmit`: PASS (exit code 0)
+2. `npx vitest run --reporter=verbose`: PASS (8 test files, 39 tests passed, 0 failed, Duration 2.74s)
+   - src/tests/volumeIntegration.test.ts (4 tests)
+   - src/tests/nightFlowEvaluation.test.ts (3 tests)
+   - src/tests/constrainedAllocation.test.ts (5 tests)
+   - src/tests/incidentStateMachine.test.ts (6 tests)
+   - src/tests/telemetryValidation.test.ts (8 tests)
+   - src/tests/portConformance.test.ts (8 tests)
+   - src/tests/endToEndSyntheticWorkflow.test.ts (1 test)
+   - src/tests/illustrativeSavings.test.ts (4 tests)
+
+## Baseline Scope Inventory
+- Implemented in code (browser-only): pure TypeScript domain functions (flowIntegration, waterBalance, nightWindowFilter, incidentStateMachine, validation, constrainedAllocation, illustrativeSavings), InMemoryIncidentRepository, ValidatedJsonFixtureIncidentRepository, FixedClock, RecordingAuditSink, React 19 UI tabs.
+- Simulated in browser: synthetic diurnal curves, hardcoded 40,280 pkt/s telemetry jitter, boolean mTLS check, click-through verification verdict.
+- Draft contracts (not runtime-enforced): contracts/openapi.yaml (OpenAPI 3.0.3 with invalid mutualTLS), contracts/telemetry.proto (uncompiled), contracts/schema.sql (unexecuted TimescaleDB/PostGIS DDL with buggy cross-meter AVG()*0.25 view).
+- Planned infrastructure: Kafka, Flink, Redis, TimescaleDB/PostGIS, Rust/Go mTLS ingress, Python OR-Tools MILP solver, Kubernetes.

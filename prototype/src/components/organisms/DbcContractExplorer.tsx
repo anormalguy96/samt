@@ -48,7 +48,8 @@ export const DbcContractExplorer: React.FC = () => {
   const handleVerify = () => {
     const validator = new TelemetryValidator(clock, registry, {
       maxClockDriftMinutes: 15,
-      clientCertificateValid: mtlsValid,
+      clientAuthenticated: mtlsValid,
+      authenticatedDeviceId: 'GW-YAS-01',
     });
 
     const now = clock.now();
@@ -56,12 +57,14 @@ export const DbcContractExplorer: React.FC = () => {
 
     const testObservation: TelemetryObservation = {
       observationId: `OBS-${Date.now()}`,
-      deviceId: 'GW-YAS-008',
+      deviceId: 'GW-YAS-01',
       meterId: 'FM-YAS-INLET-01',
       dmaId: 'DMA-YASAMAL-04',
       metric: 'FLOW_M3H',
+      canonicalUnit: 'm3/h',
       value: flowRateM3h,
       observedAt: observedTime,
+      transmittedAt: now,
       receivedAt: now,
       quality: 'VALID',
       batteryVolts,

@@ -1,0 +1,72 @@
+name: SAMT v1.1.0 CI Verification
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_USER: samt
+          POSTGRES_PASSWORD: samt_local_dev_password
+          POSTGRES_DB: samt_v1_1
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U samt -d samt_v1_1"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=15
+
+    env:
+      DATABASE_URL: postgresql://samt:samt_local_dev_password@localhost:5433/samt_v1_1
+      POSTGRES_PORT: '5433'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            prototype/package-lock.json
+            server/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: prototype
+        run: npm ci
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Typecheck frontend and server
+        run: npm run typecheck
+
+      - name: Run database migrations and deterministic seeds
+        run: |
+          npm run db:migrate
+          npm run db:seed
+
+      - name: Run domain unit tests (prototype)
+        run: npm run test:unit
+
+      - name: Run PostgreSQL conformance, HTTP workflow, outbox & failure tests (server)
+        run: npm run test:server
+
+      - name: Validate OpenAPI 3.1 contract and compile Protobuf v3 with protoc
+        run: npm run contracts:check
+
+      - name: Build server and frontend production bundles
+        run: npm run build

@@ -147,9 +147,13 @@ export const IpmvpSavingsCalculator: React.FC = () => {
                   {savingsResult.pressureAdjustedHourlySavingsM3h} m³/h
                 </span>
                 <span className="text-[10px] text-slate-500 block">
-                  {isPositive ? 'Fiziki qənaət təsdiqləndi' : 'Mənfi və ya sıfır qənaət'}
+                  {isPositive ? 'Modeled pressure-normalized reduction' : 'Zero or negative modeled savings'}
                 </span>
               </div>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-amber-warning/10 border border-amber-warning/30 mt-3 text-[11px] font-mono text-amber-warning">
+              {savingsResult.modelQualification}
             </div>
 
             <div className="p-4 rounded-xl bg-navy-950 border border-slate-800 mt-4 space-y-2 text-xs font-mono">

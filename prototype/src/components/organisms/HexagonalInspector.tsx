@@ -6,29 +6,30 @@ import { Icon } from '../atoms/Icon';
 import { useDomain } from '../../context/DomainContext';
 
 export const HexagonalInspector: React.FC = () => {
-  const { activeDbAdapter, setActiveDbAdapter } = useDomain();
+  const { runtimeMode, activeDbAdapter, setActiveDbAdapter } = useDomain();
+  const isIntegrated = runtimeMode === 'INTEGRATED_API';
 
   const parnasSecrets = [
     {
       id: 'secret-1',
-      secretTitle: 'Gizlədilən Sirr 1: Sayğac Rabitə Protokolları & Avadanlıq Fərqləri',
-      description: 'Müxtəlif istehsalçıların (Kamstrup, Diehl, Sensus) fiziki rabitə formatları (Modbus RTU, M-Bus, LoRaWAN payload formatı).',
-      hiddenMechanism: 'Şlüz adapterləri daxilində deserializasiya olunur; domen yalnız kanonik TelemetryObservation qəbul edir.',
-      stablePort: 'Port: ITelemetrySink (Kanonik TelemetryObservation)',
+      secretTitle: 'Secret 1: Telemetry Transport & Deduplication Store',
+      description: 'HTTP/JSON local dev ingress vs future Protobuf/mTLS gateway, plus PostgreSQL UNIQUE deduplication vs in-memory dedup.',
+      hiddenMechanism: 'Isolated behind ITelemetryBatchPersistence and ObservationDedupStore ports; pure domain validation stays unchanged.',
+      stablePort: 'Port: ITelemetryBatchPersistence & MeterRegistry',
     },
     {
       id: 'secret-2',
-      secretTitle: 'Gizlədilən Sirr 2: Saxlama Mühərriki və Verilənlər Bazası Dialekti',
-      description: 'Yaddaş kolleksiyası, JSON faylları və ya TimescaleDB continuous aggregate SQL sorğularının icra mexanizmi.',
-      hiddenMechanism: 'IIncidentRepository interfeysi arxasında saxlanılır. Domen kodu saxlama mühərrikinin növündən asılı deyil.',
-      stablePort: 'Port: IIncidentRepository (Domen İnsidentləri qaytarır)',
+      secretTitle: 'Secret 2: Incident Persistence, CAS & Atomic Outbox',
+      description: 'PostgreSQL 16 ACID transactions vs InMemory Map vs Validated JSON Fixture stores.',
+      hiddenMechanism: 'Hidden behind IIncidentRepository (expectedVersion CAS + commandId idempotency). Identical conformance tests verify all three adapters.',
+      stablePort: 'Port: IIncidentRepository (Postgres / InMemory / JSON)',
     },
     {
       id: 'secret-3',
-      secretTitle: 'Gizlədilən Sirr 3: Su Paylanması Alqoritmi',
-      description: 'Proqressiv doldurma, prioritetli bölgü və ya xətti proqramlaşdırma (LP/QP) həlledici mexanizmi.',
-      hiddenMechanism: 'Bölgü modulu domen portu arxasında təcrid olunub; interfeys yalnız tələbatları və mövcud suyu qəbul edir.',
-      stablePort: 'Port: IAllocationPolicy (AllocationPlanResult qaytarır)',
+      secretTitle: 'Secret 3: Authoritative Clock & Verification Policy',
+      description: 'Wall-clock server time in Integrated Mode vs deterministic FixedClock seam in automated tests.',
+      hiddenMechanism: 'Injected via Clock interface into validation, MNF night-window evaluation, and incident transitions.',
+      stablePort: 'Port: Clock (SystemClock / FixedClock)',
     },
   ];
 
@@ -38,63 +39,69 @@ export const HexagonalInspector: React.FC = () => {
         <div>
           <h3 className="text-sm font-bold font-mono text-slate-100 flex items-center gap-2">
             <Icon name="server" size={16} className="text-cyan-primary" />
-            Heksaqonal memarlıq (portlar və adapterlər) və Parnas sirləri
+            Hexagonal Architecture (Ports &amp; Adapters) &amp; Parnas Secrets
           </h3>
           <p className="text-xs text-slate-400 mt-0.5">
-            Mühazirə 4: Domen nüvəsi xarici baza və rabitə protokollarından tam təcrid olunub (DIP və Parnas informasiya gizlətməsi)
+            Lecture 4: Pure TypeScript domain core shared identically across PostgreSQL 16 HTTP API and browser adapters
           </p>
         </div>
 
-        <div className="flex items-center gap-2 bg-navy-950 p-1.5 rounded-xl border border-slate-800">
-          <span className="text-xs font-mono text-slate-400 px-2">Aktiv repozitor adapteri:</span>
-          <Button
-            size="sm"
-            variant={activeDbAdapter === 'IN_MEMORY' ? 'primary' : 'ghost'}
-            onClick={() => setActiveDbAdapter('IN_MEMORY')}
-          >
-            InMemory Repository
-          </Button>
-          <Button
-            size="sm"
-            variant={activeDbAdapter === 'VALIDATED_FIXTURE' ? 'primary' : 'ghost'}
-            onClick={() => setActiveDbAdapter('VALIDATED_FIXTURE')}
-          >
-            JSON Fixture Repository
-          </Button>
-        </div>
+        {!isIntegrated && (
+          <div className="flex items-center gap-2 bg-navy-950 p-1.5 rounded-xl border border-slate-800">
+            <span className="text-xs font-mono text-slate-400 px-2">Demo isolated adapter:</span>
+            <Button
+              size="sm"
+              variant={activeDbAdapter === 'IN_MEMORY' ? 'primary' : 'ghost'}
+              onClick={() => setActiveDbAdapter('IN_MEMORY')}
+            >
+              InMemory Repository
+            </Button>
+            <Button
+              size="sm"
+              variant={activeDbAdapter === 'VALIDATED_FIXTURE' ? 'primary' : 'ghost'}
+              onClick={() => setActiveDbAdapter('VALIDATED_FIXTURE')}
+            >
+              JSON Fixture Repository
+            </Button>
+          </div>
+        )}
       </Card>
 
-      {/* Active Adapter Status */}
       <Card
         glow
-        borderVariant={activeDbAdapter === 'IN_MEMORY' ? 'cyan' : 'emerald'}
+        borderVariant={isIntegrated ? 'emerald' : activeDbAdapter === 'IN_MEMORY' ? 'cyan' : 'emerald'}
         className="p-4 bg-navy-900/90"
       >
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-lg bg-navy-950 text-cyan-primary border border-slate-800">
               <Icon name="server" size={20} />
             </div>
             <div>
               <div className="text-xs font-mono font-bold text-slate-100">
-                {activeDbAdapter === 'IN_MEMORY'
-                  ? 'IIncidentRepository -> InMemoryIncidentRepository (Xalis Map saxlama)'
-                  : 'IIncidentRepository -> ValidatedJsonFixtureIncidentRepository (Doğrulanmış JSON Fixture)'}
+                {isIntegrated
+                  ? 'IIncidentRepository → PostgresIncidentRepository (PostgreSQL 16 via /v1 HTTP API)'
+                  : activeDbAdapter === 'IN_MEMORY'
+                  ? 'IIncidentRepository → InMemoryIncidentRepository (Isolated Demo Store)'
+                  : 'IIncidentRepository → ValidatedJsonFixtureIncidentRepository (Isolated Demo Store)'}
               </div>
               <div className="text-[11px] font-mono text-slate-400 mt-0.5">
-                {activeDbAdapter === 'IN_MEMORY'
-                  ? 'Domen testləri və canlı demo üçün xalis TypeScript Map() əsaslı oxuma/yazma adapteri (versiya yoxlanışı ilə).'
-                  : 'Öncədən təsdiqlənmiş 3 pilot DMA insidentini yükləyən və seans daxilində copy-on-write dəstəkləyən adapter.'}
+                {isIntegrated
+                  ? 'Durable ACID persistence with expectedVersion CAS, command_id idempotency, audit_events, and notification_outbox.'
+                  : 'Note: Switching demo adapters selects an isolated in-memory store with its own seed state; it does NOT migrate records between repositories.'}
               </div>
             </div>
           </div>
-          <Badge variant={activeDbAdapter === 'IN_MEMORY' ? 'info' : 'nominal'} showDot>
-            {activeDbAdapter === 'IN_MEMORY' ? 'In-Memory Aktiv' : 'Fixture Aktiv'}
+          <Badge variant={isIntegrated ? 'nominal' : 'info'} showDot>
+            {isIntegrated
+              ? 'PostgreSQL 16 Active'
+              : activeDbAdapter === 'IN_MEMORY'
+              ? 'Demo In-Memory'
+              : 'Demo JSON Fixture'}
           </Badge>
         </div>
       </Card>
 
-      {/* Parnas Information Hiding Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {parnasSecrets.map((secret) => (
           <Card key={secret.id} hoverable className="flex flex-col justify-between space-y-3">
@@ -102,16 +109,10 @@ export const HexagonalInspector: React.FC = () => {
               <span className="text-xs font-mono font-bold text-cyan-primary">
                 {secret.secretTitle}
               </span>
-              <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                {secret.description}
-              </p>
+              <p className="text-xs text-slate-300 mt-2 leading-relaxed">{secret.description}</p>
             </div>
-
             <div className="pt-3 border-t border-slate-800 space-y-2 text-xs font-mono">
-              <div className="text-slate-400">
-                <span className="text-slate-500 block text-[10px]">Təcrid edilən realizasiya:</span>
-                {secret.hiddenMechanism}
-              </div>
+              <div className="text-slate-400">{secret.hiddenMechanism}</div>
               <div className="p-2 rounded bg-navy-950 text-emerald-brand text-[11px] border border-emerald-brand/20">
                 {secret.stablePort}
               </div>

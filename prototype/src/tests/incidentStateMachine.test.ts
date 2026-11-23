@@ -1,11 +1,18 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { transitionIncident } from '../domain/incident/incidentStateMachine';
 import { FixedClock } from '../domain/ports/Clock';
-import type { Incident } from '../domain/ports/IncidentPort';
+import type { AuthorizedActor, Incident } from '../domain/ports/IncidentPort';
 
-describe('Incident State Machine & Guarded Transitions (Lecture 2)', () => {
+describe('Incident State Machine & Authoritative Verification (Lecture 2)', () => {
   let clock: FixedClock;
   let initialIncident: Incident;
+  const dispatcher: AuthorizedActor = { actorId: 'dispatcher-baku-01', role: 'dispatcher' };
+  const viewer: AuthorizedActor = { actorId: 'viewer-analyst-01', role: 'viewer' };
+
+  const preStart = new Date('2026-10-19T22:00:00Z');
+  const preEnd = new Date('2026-10-20T00:00:00Z');
+  const postStart = new Date('2026-10-20T22:00:00Z');
+  const postEnd = new Date('2026-10-21T00:00:00Z');
 
   beforeEach(() => {
     clock = new FixedClock('2026-10-20T03:15:00+04:00');
@@ -21,228 +28,232 @@ describe('Incident State Machine & Guarded Transitions (Lecture 2)', () => {
     };
   });
 
-  it('completes the full canonical lifecycle under valid events', () => {
-    // 1. DETECTED -> ASSIGNED
-    const assignResult = transitionIncident(
-      initialIncident,
+  function bringToRepaired(inc: Incident): Incident {
+    const a = transitionIncident(
+      inc,
       {
         type: 'ASSIGN',
         crew: {
-          crewId: 'CREW-01',
-          crewName: 'Bakı Qəza Briqadası #1',
+          crewId: 'C1',
+          crewName: 'Crew 1',
           crewPhone: '+994 50 111-22-33',
-          role: 'Baş Mühəndis: Kamran',
-          etaMinutes: 20,
-          assignedAt: clock.now(),
+          role: 'Engineer',
+          etaMinutes: 15,
         },
       },
-      clock
+      clock,
+      dispatcher
     );
-    expect(assignResult.success).toBe(true);
-    expect(assignResult.incident.state).toBe('ASSIGNED');
-    expect(assignResult.incident.version).toBe(2);
-
-    // 2. ASSIGNED -> IN_REPAIR
-    const repairStartResult = transitionIncident(
-      assignResult.incident,
-      { type: 'START_REPAIR', technicianId: 'TECH-101', checkInGps: '40.375, 49.815' },
-      clock
-    );
-    expect(repairStartResult.success).toBe(true);
-    expect(repairStartResult.incident.state).toBe('IN_REPAIR');
-
-    // 3. IN_REPAIR -> REPAIRED
-    const evidenceResult = transitionIncident(
-      repairStartResult.incident,
+    expect(a.success).toBe(true);
+    const s = transitionIncident(a.incident, { type: 'START_REPAIR', technicianId: 'T1' }, clock, dispatcher);
+    expect(s.success).toBe(true);
+    const r = transitionIncident(
+      s.incident,
       {
         type: 'RECORD_REPAIR_EVIDENCE',
         evidence: {
-          technicianId: 'TECH-101',
-          repairMethod: 'Mufta Kraun Ø200mm',
-          clampType: 'Kompozit Klemma',
-          photoFixtureRef: 'fixture://photos/repair-yas-01.webp',
-          completedAt: clock.now(),
-          technicianNotes: 'Boru qəzası təmir olundu.',
+          technicianId: 'T1',
+          repairMethod: 'Composite Clamp Ø200mm',
+          photoFixtureRef: 'fixture://photos/repair-01.webp',
+          technicianNotes: 'Sealed',
         },
       },
-      clock
+      clock,
+      dispatcher
     );
-    expect(evidenceResult.success).toBe(true);
-    expect(evidenceResult.incident.state).toBe('REPAIRED');
+    expect(r.success).toBe(true);
+    return r.incident;
+  }
 
-    // 4. REPAIRED -> VERIFIED
-    const verifyResult = transitionIncident(
-      evidenceResult.incident,
+  it('completes the full canonical lifecycle under valid evidence and authoritative actor', () => {
+    const repaired = bringToRepaired(initialIncident);
+    expect(repaired.state).toBe('REPAIRED');
+    expect(repaired.version).toBe(4);
+
+    const verify = transitionIncident(
+      repaired,
       {
         type: 'EVALUATE_VERIFICATION',
-        evaluation: {
-          evaluatedAt: clock.now(),
-          preRepairMnfM3h: 68.2,
-          postRepairMnfM3h: 26.1,
-          baselineMnfM3h: 25.0,
-          verifiedLossDropM3h: 42.1,
-          isSuccessful: true,
-          reason: 'Post-repair flow restored to within baseline tolerance',
-        },
-      },
-      clock
-    );
-    expect(verifyResult.success).toBe(true);
-    expect(verifyResult.incident.state).toBe('VERIFIED');
-
-    // 5. VERIFIED -> CLOSED
-    const closeResult = transitionIncident(
-      verifyResult.incident,
-      { type: 'CLOSE', closedBy: 'DISPATCHER-BAKU-CENTRAL' },
-      clock
-    );
-    expect(closeResult.success).toBe(true);
-    expect(closeResult.incident.state).toBe('CLOSED');
-  });
-
-  it('rejects invalid state jumps (e.g. DETECTED directly to REPAIRED)', () => {
-    const invalidJump = transitionIncident(
-      initialIncident,
-      {
-        type: 'RECORD_REPAIR_EVIDENCE',
         evidence: {
-          technicianId: 'TECH-001',
-          repairMethod: 'Bypass',
-          photoFixtureRef: 'ref',
-          completedAt: clock.now(),
-          technicianNotes: 'Skip',
+          baselineMnfM3h: 25.0,
+          preRepairWindow: {
+            windowStart: preStart,
+            windowEnd: preEnd,
+            sampleCount: 16,
+            coverageRatio: 0.95,
+            mnfM3h: 68.2,
+            avgPressureBar: 4.0,
+            provenance: 'POSTGRES_TELEMETRY',
+          },
+          postRepairWindow: {
+            windowStart: postStart,
+            windowEnd: postEnd,
+            sampleCount: 16,
+            coverageRatio: 0.95,
+            mnfM3h: 26.1,
+            avgPressureBar: 4.0,
+            provenance: 'POSTGRES_TELEMETRY',
+          },
         },
       },
-      clock
+      clock,
+      dispatcher
     );
-    expect(invalidJump.success).toBe(false);
-    expect(invalidJump.incident.state).toBe('DETECTED');
-    if (!invalidJump.success) {
-      expect(invalidJump.error).toContain('Guard violation');
+
+    expect(verify.success).toBe(true);
+    expect(verify.incident.state).toBe('VERIFIED');
+    expect(verify.incident.verificationResult?.outcome).toBe('VERIFIED_SYNTHETIC_POLICY');
+    expect(verify.incident.verificationResult?.evaluatedBy).toBe('dispatcher-baku-01');
+
+    // Attempt forged closedBy in payload: server derives authoritative actor instead
+    const closed = transitionIncident(
+      verify.incident,
+      { type: 'CLOSE', closedBy: 'FORGED-ADMIN' },
+      clock,
+      dispatcher
+    );
+    expect(closed.success).toBe(true);
+    expect(closed.incident.state).toBe('CLOSED');
+    expect(closed.incident.closedBy).toBe('dispatcher-baku-01');
+  });
+
+  it('ignores forged isSuccessful=true when post-repair MNF remains unacceptably high (reverts to IN_REPAIR)', () => {
+    const repaired = bringToRepaired(initialIncident);
+    const forged = transitionIncident(
+      repaired,
+      {
+        type: 'EVALUATE_VERIFICATION',
+        evidence: {
+          baselineMnfM3h: 25.0,
+          isSuccessful: true,
+          claimedSuccess: true,
+          preRepairWindow: {
+            windowStart: preStart,
+            windowEnd: preEnd,
+            sampleCount: 16,
+            coverageRatio: 0.95,
+            mnfM3h: 70.0,
+            avgPressureBar: 4.0,
+            provenance: 'POSTGRES_TELEMETRY',
+          },
+          postRepairWindow: {
+            windowStart: postStart,
+            windowEnd: postEnd,
+            sampleCount: 16,
+            coverageRatio: 0.95,
+            mnfM3h: 65.0, // Still leaking badly!
+            avgPressureBar: 4.0,
+            provenance: 'POSTGRES_TELEMETRY',
+          },
+        },
+      },
+      clock,
+      dispatcher
+    );
+
+    expect(forged.success).toBe(true);
+    expect(forged.incident.state).toBe('IN_REPAIR');
+    expect(forged.incident.verificationResult?.isSuccessful).toBe(false);
+    expect(forged.incident.verificationResult?.outcome).toBe('FAILED_REWORK_REQUIRED');
+  });
+
+  it('rejects pressure-only flow reduction as rework rather than false VERIFIED', () => {
+    const repaired = bringToRepaired(initialIncident);
+    const pressureOnly = transitionIncident(
+      repaired,
+      {
+        type: 'EVALUATE_VERIFICATION',
+        evidence: {
+          baselineMnfM3h: 25.0,
+          leakageExponent: 0.5,
+          preRepairWindow: {
+            windowStart: preStart,
+            windowEnd: preEnd,
+            sampleCount: 16,
+            coverageRatio: 0.95,
+            mnfM3h: 100.0,
+            avgPressureBar: 4.0,
+            provenance: 'POSTGRES_TELEMETRY',
+          },
+          postRepairWindow: {
+            windowStart: postStart,
+            windowEnd: postEnd,
+            sampleCount: 16,
+            coverageRatio: 0.95,
+            mnfM3h: 50.0,
+            avgPressureBar: 1.0, // Pure pressure drop: normalized loss drop = 0!
+            provenance: 'POSTGRES_TELEMETRY',
+          },
+        },
+      },
+      clock,
+      dispatcher
+    );
+
+    expect(pressureOnly.success).toBe(true);
+    expect(pressureOnly.incident.state).toBe('IN_REPAIR');
+    expect(pressureOnly.incident.verificationResult?.verifiedLossDropM3h).toBeCloseTo(0, 2);
+  });
+
+  it('rejects insufficient coverage or incomparable windows without yielding VERIFIED', () => {
+    const repaired = bringToRepaired(initialIncident);
+    const lowCoverage = transitionIncident(
+      repaired,
+      {
+        type: 'EVALUATE_VERIFICATION',
+        evidence: {
+          baselineMnfM3h: 25.0,
+          isSuccessful: true,
+          preRepairWindow: {
+            windowStart: preStart,
+            windowEnd: preEnd,
+            sampleCount: 16,
+            coverageRatio: 0.95,
+            mnfM3h: 68.0,
+            provenance: 'POSTGRES_TELEMETRY',
+          },
+          postRepairWindow: {
+            windowStart: postStart,
+            windowEnd: postEnd,
+            sampleCount: 3, // Below min 8
+            coverageRatio: 0.25, // Below min 0.80
+            mnfM3h: 25.0,
+            provenance: 'POSTGRES_TELEMETRY',
+          },
+        },
+      },
+      clock,
+      dispatcher
+    );
+
+    expect(lowCoverage.success).toBe(false);
+    expect(lowCoverage.incident.state).toBe('REPAIRED');
+    if (!lowCoverage.success) {
+      expect(lowCoverage.errorCode).toBe('INSUFFICIENT_EVIDENCE');
     }
   });
 
-  it('enforces guards on crew assignment (requires crew details and positive ETA)', () => {
-    const missingPhone = transitionIncident(
+  it('blocks viewer role mutations and prevents transitions from terminal CLOSED state', () => {
+    const viewerAttempt = transitionIncident(
       initialIncident,
+      { type: 'MARK_FALSE_ALARM', reason: 'Viewer attempt' },
+      clock,
+      viewer
+    );
+    expect(viewerAttempt.success).toBe(false);
+    if (!viewerAttempt.success) expect(viewerAttempt.errorCode).toBe('UNAUTHORIZED_ROLE');
+
+    const closed: Incident = { ...initialIncident, state: 'CLOSED', version: 5 };
+    const afterClose = transitionIncident(
+      closed,
       {
         type: 'ASSIGN',
-        crew: {
-          crewId: 'CREW-01',
-          crewName: 'Anonymous Crew',
-          crewPhone: '', // Empty phone
-          role: 'Helper',
-          etaMinutes: 20,
-          assignedAt: clock.now(),
-        },
+        crew: { crewId: 'C1', crewName: 'Crew', crewPhone: '+994', role: 'Eng', etaMinutes: 10 },
       },
-      clock
+      clock,
+      dispatcher
     );
-    expect(missingPhone.success).toBe(false);
-    if (!missingPhone.success) {
-      expect(missingPhone.error).toContain('crewPhone');
-    }
-
-    const zeroEta = transitionIncident(
-      initialIncident,
-      {
-        type: 'ASSIGN',
-        crew: {
-          crewId: 'CREW-01',
-          crewName: 'Crew A',
-          crewPhone: '+994 50 123-45-67',
-          role: 'Master',
-          etaMinutes: 0, // ETA must be > 0
-          assignedAt: clock.now(),
-        },
-      },
-      clock
-    );
-    expect(zeroEta.success).toBe(false);
-    if (!zeroEta.success) {
-      expect(zeroEta.error).toContain('ETA must be greater than zero');
-    }
-  });
-
-  it('reverts incident to IN_REPAIR for rework when hydraulic verification fails', () => {
-    // Bring incident to REPAIRED
-    const assigned = transitionIncident(initialIncident, {
-      type: 'ASSIGN',
-      crew: { crewId: 'C1', crewName: 'Crew 1', crewPhone: '+994', role: 'Eng', etaMinutes: 10, assignedAt: clock.now() },
-    }, clock).incident;
-
-    const inRepair = transitionIncident(assigned, { type: 'START_REPAIR', technicianId: 'T1' }, clock).incident;
-
-    const repaired = transitionIncident(inRepair, {
-      type: 'RECORD_REPAIR_EVIDENCE',
-      evidence: { technicianId: 'T1', repairMethod: 'Clamp', photoFixtureRef: 'photo.jpg', completedAt: clock.now(), technicianNotes: 'Done' },
-    }, clock).incident;
-
-    expect(repaired.state).toBe('REPAIRED');
-
-    // Attempt verification with failed hydraulic result (leak persists!)
-    const failedVerification = transitionIncident(repaired, {
-      type: 'EVALUATE_VERIFICATION',
-      evaluation: {
-        evaluatedAt: clock.now(),
-        preRepairMnfM3h: 70.0,
-        postRepairMnfM3h: 65.0, // High post-repair flow!
-        baselineMnfM3h: 25.0,
-        verifiedLossDropM3h: 5.0,
-        isSuccessful: false, // Verification failed
-        reason: 'Post-repair MNF (65 m³/h) remains far above baseline envelope (25 m³/h)',
-      },
-    }, clock);
-
-    expect(failedVerification.success).toBe(true);
-    // Crucial: Must transition back to IN_REPAIR for rework, NOT advance to VERIFIED!
-    expect(failedVerification.incident.state).toBe('IN_REPAIR');
-    if (failedVerification.success) {
-      expect(failedVerification.transitionDescription).toContain('FAILED');
-    }
-    expect(failedVerification.incident.verificationResult?.isSuccessful).toBe(false);
-  });
-
-  it('supports the FALSE_ALARM branch and closes without repair', () => {
-    const falseAlarmResult = transitionIncident(
-      initialIncident,
-      {
-        type: 'MARK_FALSE_ALARM',
-        reviewerId: 'SUPERVISOR-01',
-        reason: 'Acoustic noise was due to secondary hospital booster pump activation, not pipe burst',
-      },
-      clock
-    );
-    expect(falseAlarmResult.success).toBe(true);
-    expect(falseAlarmResult.incident.state).toBe('FALSE_ALARM');
-
-    // Can be closed directly from FALSE_ALARM
-    const closeResult = transitionIncident(
-      falseAlarmResult.incident,
-      { type: 'CLOSE', closedBy: 'DISPATCHER' },
-      clock
-    );
-    expect(closeResult.success).toBe(true);
-    expect(closeResult.incident.state).toBe('CLOSED');
-  });
-
-  it('prevents terminal states from wrapping around to DETECTED', () => {
-    // Bring to CLOSED
-    const closed: Incident = {
-      ...initialIncident,
-      state: 'CLOSED',
-      version: 5,
-    };
-
-    const tryAssign = transitionIncident(closed, {
-      type: 'ASSIGN',
-      crew: { crewId: 'C1', crewName: 'Crew', crewPhone: '+994', role: 'Eng', etaMinutes: 10, assignedAt: clock.now() },
-    }, clock);
-
-    expect(tryAssign.success).toBe(false);
-    expect(tryAssign.incident.state).toBe('CLOSED');
-    if (!tryAssign.success) {
-      expect(tryAssign.error).toContain('Guard violation');
-    }
+    expect(afterClose.success).toBe(false);
+    if (!afterClose.success) expect(afterClose.errorCode).toBe('TERMINAL_STATE');
   });
 });

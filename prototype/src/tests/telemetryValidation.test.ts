@@ -2,137 +2,137 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { FixedClock } from '../domain/ports/Clock';
 import { StandardMeterRegistry } from '../domain/adapters/StandardMeterRegistry';
 import { TelemetryValidator } from '../domain/telemetry/validation';
-import type { TelemetryObservation } from '../domain/ports/TelemetryPort';
+import type { TelemetryObservationInput } from '../domain/ports/TelemetryPort';
 
-describe('Telemetry Ingestion & Validation (DbC Contracts & Robustness)', () => {
+describe('Telemetry Identity, Binding, Time & Historical Policy (SAMT v1.1.0)', () => {
   let clock: FixedClock;
   let registry: StandardMeterRegistry;
   let validator: TelemetryValidator;
 
   beforeEach(() => {
-    // Fixed clock at 14:00 AZT (UTC+4: 10:00 UTC)
-    clock = new FixedClock('2026-10-20T10:00:00Z');
+    clock = new FixedClock('2026-10-20T10:00:00Z'); // 14:00 AZT
     registry = new StandardMeterRegistry();
     validator = new TelemetryValidator(clock, registry, {
       maxClockDriftMinutes: 15,
-      clientCertificateValid: true,
+      maxHistoricalAgeHours: 72,
+      clientAuthenticated: true,
+      authenticatedDeviceId: 'GW-YAS-01',
     });
   });
 
-  const createBaseObservation = (overrides: Partial<TelemetryObservation> = {}): TelemetryObservation => ({
+  const makeObs = (overrides: Partial<TelemetryObservationInput> = {}): TelemetryObservationInput => ({
     observationId: 'obs-001',
-    deviceId: 'DEV-YAS-01',
+    deviceId: 'GW-YAS-01',
     meterId: 'FM-YAS-INLET-01',
     dmaId: 'DMA-YASAMAL-04',
     metric: 'FLOW_M3H',
-    value: 412.5,
+    unit: 'm3/h',
+    value: 112.5,
     observedAt: clock.now(),
-    receivedAt: clock.now(),
-    quality: 'VALID',
-    batteryVolts: 3.4,
+    transmittedAt: clock.now(),
+    batteryVolts: 3.6,
     ...overrides,
   });
 
-  it('accepts valid observations conforming to all precondition bounds', () => {
-    const obs = createBaseObservation();
-    const result = validator.validate(obs);
-
-    expect(result.accepted).toBe(true);
-    expect(result.quality).toBe('VALID');
-    expect(result.isHistoricalReplay).toBe(false);
+  it('accepts valid bound live reading and derives server-owned receivedAt', () => {
+    const res = validator.validate(makeObs());
+    expect(res.accepted).toBe(true);
+    expect(res.code).toBe('ACCEPTED_LIVE');
+    expect(res.quality).toBe('VALID');
+    expect(res.ingestionMode).toBe('LIVE');
+    expect(res.receivedAt.toISOString()).toBe('2026-10-20T10:00:00.000Z');
   });
 
-  it('rejects duplicate observation identities', () => {
-    const obs = createBaseObservation({ observationId: 'obs-duplicate-id' });
-    const first = validator.validate(obs);
-    expect(first.accepted).toBe(true);
+  it('rejects duplicate (meterId, observationId), unknown meters, and inactive meters', () => {
+    expect(validator.validate(makeObs({ observationId: 'dup-1' })).accepted).toBe(true);
+    const dup = validator.validate(makeObs({ observationId: 'dup-1' }));
+    expect(dup.accepted).toBe(false);
+    expect(dup.code).toBe('DUPLICATE');
 
-    const second = validator.validate(obs);
-    expect(second.accepted).toBe(false);
-    expect(second.quality).toBe('REJECTED');
-    expect(second.reason).toContain('Duplicate observation identity');
+    const unknown = validator.validate(makeObs({ observationId: 'unk-1', meterId: 'FM-ROGUE-999' }));
+    expect(unknown.accepted).toBe(false);
+    expect(unknown.code).toBe('UNKNOWN_METER');
+
+    const inactive = validator.validate(makeObs({ observationId: 'inact-1', meterId: 'FM-YAS-INACTIVE-99' }));
+    expect(inactive.accepted).toBe(false);
+    expect(inactive.code).toBe('INACTIVE_METER');
   });
 
-  it('rejects observations from unknown meters not present in registry', () => {
-    const obs = createBaseObservation({
-      observationId: 'obs-unregistered',
-      meterId: 'FM-ROGUE-METER-999',
-    });
-    const result = validator.validate(obs);
+  it('enforces device-to-meter binding, meter-to-DMA binding, metric role compatibility, and canonical units', () => {
+    const wrongDevice = validator.validate(
+      makeObs({ observationId: 'b1', meterId: 'FM-YAS-INLET-02' }) // Bound to GW-YAS-02, not GW-YAS-01
+    );
+    expect(wrongDevice.accepted).toBe(false);
+    expect(wrongDevice.code).toBe('BINDING_MISMATCH');
 
-    expect(result.accepted).toBe(false);
-    expect(result.quality).toBe('REJECTED');
-    expect(result.reason).toContain('Unknown meter');
+    const wrongDma = validator.validate(makeObs({ observationId: 'b2', dmaId: 'DMA-NASIMI-02' }));
+    expect(wrongDma.accepted).toBe(false);
+    expect(wrongDma.code).toBe('BINDING_MISMATCH');
+
+    const wrongMetric = validator.validate(makeObs({ observationId: 'b3', metric: 'PRESSURE_BAR', unit: 'bar' }));
+    expect(wrongMetric.accepted).toBe(false);
+    expect(wrongMetric.code).toBe('INCOMPATIBLE_METRIC_OR_UNIT');
+
+    const wrongUnit = validator.validate(makeObs({ observationId: 'b4', metric: 'FLOW_M3H', unit: 'bar' }));
+    expect(wrongUnit.accepted).toBe(false);
+    expect(wrongUnit.code).toBe('INCOMPATIBLE_METRIC_OR_UNIT');
   });
 
-  it('rejects physically impossible negative flow or pressure readings', () => {
-    const obs = createBaseObservation({
-      observationId: 'obs-negative-val',
-      value: -15.4,
-    });
-    const result = validator.validate(obs);
+  it('rejects negative/non-finite values and quarantines future skew or gateway clock drift', () => {
+    const neg = validator.validate(makeObs({ observationId: 'v1', value: -5 }));
+    expect(neg.accepted).toBe(false);
+    expect(neg.code).toBe('INVALID_VALUE');
 
-    expect(result.accepted).toBe(false);
-    expect(result.quality).toBe('REJECTED');
-    expect(result.reason).toContain('Physically invalid reading');
+    const nan = validator.validate(makeObs({ observationId: 'v2', value: Number.NaN }));
+    expect(nan.accepted).toBe(false);
+    expect(nan.code).toBe('INVALID_VALUE');
+
+    const futureObs = validator.validate(
+      makeObs({
+        observationId: 't1',
+        observedAt: new Date(clock.now().getTime() + 25 * 60 * 1000),
+      })
+    );
+    expect(futureObs.accepted).toBe(false);
+    expect(futureObs.quality).toBe('QUARANTINED');
+    expect(futureObs.code).toBe('CLOCK_SKEW_QUARANTINED');
+
+    const driftedGateway = validator.validate(
+      makeObs({
+        observationId: 't2',
+        transmittedAt: new Date(clock.now().getTime() - 30 * 60 * 1000),
+      })
+    );
+    expect(driftedGateway.accepted).toBe(false);
+    expect(driftedGateway.quality).toBe('QUARANTINED');
   });
 
-  it('quarantines readings with future clock skew > 15 minutes', () => {
-    // Observation timestamped 25 minutes into the future
-    const futureTime = new Date(clock.now().getTime() + 25 * 60 * 1000);
-    const obs = createBaseObservation({
-      observationId: 'obs-future-skew',
-      observedAt: futureTime,
-    });
-    const result = validator.validate(obs);
+  it('derives bounded historical replay server-side and blocks unauthenticated bypass or >72h age', () => {
+    const thirtySixHoursAgo = new Date(clock.now().getTime() - 36 * 3600 * 1000);
+    const replay = validator.validate(makeObs({ observationId: 'h1', observedAt: thirtySixHoursAgo }));
+    expect(replay.accepted).toBe(true);
+    expect(replay.ingestionMode).toBe('HISTORICAL_REPLAY');
+    expect(replay.isHistoricalReplay).toBe(true);
 
-    expect(result.accepted).toBe(false);
-    expect(result.quality).toBe('QUARANTINED');
-    expect(result.reason).toContain('Clock skew in future');
+    const eightyHoursAgo = new Date(clock.now().getTime() - 80 * 3600 * 1000);
+    const tooOld = validator.validate(
+      makeObs({ observationId: 'h2', observedAt: eightyHoursAgo, callerHistoricalHint: true })
+    );
+    expect(tooOld.accepted).toBe(false);
+    expect(tooOld.code).toBe('HISTORICAL_AGE_EXCEEDED');
+
+    // Caller historical flag CANNOT bypass authentication
+    const unauth = validator.validate(
+      makeObs({ observationId: 'h3', observedAt: thirtySixHoursAgo, callerHistoricalHint: true }),
+      { clientAuthenticated: false }
+    );
+    expect(unauth.accepted).toBe(false);
+    expect(unauth.code).toBe('UNAUTHENTICATED');
   });
 
-  it('handles 48-hour reconnection outage: historical replay is accepted when flagged', () => {
-    // 36 hours in the past
-    const outageTime = new Date(clock.now().getTime() - 36 * 3600 * 1000);
-    
-    // Without replay flag: quarantined as unexpected late arrival
-    const regularValidator = new TelemetryValidator(clock, registry, { allowHistoricalReplay: false });
-    const quarantined = regularValidator.validate(createBaseObservation({
-      observationId: 'obs-outage-unflagged',
-      observedAt: outageTime,
-    }));
-    expect(quarantined.accepted).toBe(false);
-    expect(quarantined.quality).toBe('QUARANTINED');
-
-    // With historical replay flag enabled: accepted as historical data
-    const replayValidator = new TelemetryValidator(clock, registry, { allowHistoricalReplay: true });
-    const accepted = replayValidator.validate(createBaseObservation({
-      observationId: 'obs-outage-flagged',
-      observedAt: outageTime,
-    }));
-    expect(accepted.accepted).toBe(true);
-    expect(accepted.isHistoricalReplay).toBe(true);
-  });
-
-  it('flags observation as SUSPECT when battery voltage is low (< 3.0V)', () => {
-    const obs = createBaseObservation({
-      observationId: 'obs-low-battery',
-      batteryVolts: 2.7,
-    });
-    const result = validator.validate(obs);
-
-    expect(result.accepted).toBe(true);
-    expect(result.quality).toBe('SUSPECT');
-    expect(result.reason).toContain('Low battery warning');
-  });
-
-  it('simulates transport authentication failure when client certificate is untrusted', () => {
-    const unauthValidator = new TelemetryValidator(clock, registry, { clientCertificateValid: false });
-    const obs = createBaseObservation({ observationId: 'obs-unauth' });
-    const result = unauthValidator.validate(obs);
-
-    expect(result.accepted).toBe(false);
-    expect(result.quality).toBe('REJECTED');
-    expect(result.reason).toContain('Transport authentication failure');
+  it('flags low battery (< 3.0V) as SUSPECT while accepting valid reading', () => {
+    const res = validator.validate(makeObs({ observationId: 'bat-1', batteryVolts: 2.7 }));
+    expect(res.accepted).toBe(true);
+    expect(res.quality).toBe('SUSPECT');
   });
 });

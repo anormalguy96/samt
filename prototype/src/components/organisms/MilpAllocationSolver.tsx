@@ -11,6 +11,7 @@ export const MilpAllocationSolver: React.FC = () => {
     availableSupplyM3,
     setAvailableSupplyM3,
     allocationResult,
+    allocationError,
     runAllocation,
     isSolvingAllocation,
   } = useDomain();
@@ -62,7 +63,13 @@ export const MilpAllocationSolver: React.FC = () => {
           <div className="space-y-2 p-3 rounded-lg bg-navy-900 text-xs font-mono text-slate-300 border border-slate-800">
             <div className="flex justify-between">
               <span className="text-slate-500">Bölgü alqoritmi:</span>
-              <span className="text-cyan-primary font-bold">Proqressiv doldurma</span>
+              <span className="text-cyan-primary font-bold">Proqressiv doldurma (Evristika, MILP deyil)</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Vahid / Üfüq:</span>
+              <span className="text-slate-200 font-bold">
+                {allocationResult.volumeUnit === 'THOUSAND_M3' ? 'thousand m³' : 'm³'} / {allocationResult.deliveryHorizonHours}h
+              </span>
             </div>
             <div className="flex justify-between">
               <span className="text-slate-500">Hesablama müddəti:</span>
@@ -70,8 +77,15 @@ export const MilpAllocationSolver: React.FC = () => {
             </div>
             <div className="flex justify-between">
               <span className="text-slate-500">Təminat üzrə Cini əmsalı:</span>
-              <span className="text-cyan-primary font-bold">{allocationResult.giniIndex}</span>
+              <span className="text-cyan-primary font-bold">
+                {allocationResult.giniIndex !== null ? allocationResult.giniIndex : 'Undefined (N/A)'}
+              </span>
             </div>
+            {allocationError && (
+              <div className="p-2 rounded bg-rose-critical/15 text-rose-critical border border-rose-critical/40 text-[11px]">
+                {allocationError}
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-slate-500">Ayrılan toplam su:</span>
               <span className="text-emerald-brand font-bold">{allocationResult.totalAllocatedM3} min m³</span>
@@ -128,14 +142,14 @@ export const MilpAllocationSolver: React.FC = () => {
                   <td className="p-3 text-right">
                     <span
                       className={`inline-block px-2 py-0.5 rounded text-[11px] font-bold ${
-                        c.satisfactionPct >= 90
+                        (c.satisfactionPct ?? 0) >= 90
                           ? 'bg-emerald-brand/15 text-emerald-brand'
-                          : c.satisfactionPct >= 75
+                          : (c.satisfactionPct ?? 0) >= 75
                           ? 'bg-cyan-primary/15 text-cyan-primary'
                           : 'bg-amber-warning/15 text-amber-warning'
                       }`}
                     >
-                      {c.satisfactionPct}%
+                      {c.satisfactionPct !== null ? `${c.satisfactionPct}%` : 'N/A'}
                     </span>
                   </td>
                   <td className="p-3 text-[10px] text-slate-400 font-mono">

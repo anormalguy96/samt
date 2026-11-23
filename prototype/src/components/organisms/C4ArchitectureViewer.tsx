@@ -10,37 +10,37 @@ export const C4ArchitectureViewer: React.FC = () => {
 
   const c4Models: Record<'l1' | 'l2' | 'l3' | 'prototype', C4Model> = {
     prototype: {
-      title: 'Cari Reallaşdırma: Hexagonal Prototip Memarlığı (In-Memory & Test Seams)',
+      title: 'Current Active Implementation: SAMT v1.1.0 Modular Monolith (React 19 + Node/TS HTTP API + PostgreSQL 16)',
       cards: [
         {
-          name: 'Domain Core (Saf TypeScript Mühərriki)',
-          tech: 'Pure Domain Logic · Sıfır Kənar Asılılıq',
-          desc: 'Kütlə balansı, Riman trapesiya inteqrasiyası, 02:00–04:00 gecə pəncərəsi süzgəci, təmiz FSM keçidləri və mütərəqqi doldurma (progressive filling) paylanması.',
+          name: 'Shared Pure TypeScript Domain Core',
+          tech: 'prototype/src/domain/ & application/ · Zero Framework Imports',
+          desc: 'Clipped per-meter trapezoidal integration, signed water balance, [02:00, 04:00) AZT MNF heuristic, guarded FSM with authoritative verification, progressive-filling allocation, and Torricelli savings.',
         },
         {
-          name: 'Hexagonal Portlar və Müqavilələr',
-          tech: 'TypeScript İnterfeysləri (Clock, Telemetry, Incident, Audit)',
-          desc: 'Clock.now(), ITelemetrySink, IIncidentRepository, IAuditSink, INotifier. Bütün domen funksiyaları yalnız bu dar portlara istinad edir (DIP / Hexagonal).',
+          name: 'SAMT v1.1.0 HTTP Service (/v1)',
+          tech: 'Node.js 22 · Express · Zod · Server-Side RBAC',
+          desc: 'Single modular monolith exposing /health, /ready, and /v1/* operational routes with viewer/dispatcher/device auth, correlation IDs, expectedVersion CAS (409), and command_id idempotency.',
         },
         {
-          name: 'Əvəzlənə bilən Adapterlər (Dual Real Adapters)',
-          tech: 'InMemoryIncidentRepository & ValidatedJsonFixtureIncidentRepository',
-          desc: 'Tam funksional iki real adapter: yaddaşdaxili oxu/yazı və JSON fixturundan COW semantikası ilə oxu. Eyni port müqavilə testlərindən keçir.',
+          name: 'PostgreSQL 16 Persistence & Outbox',
+          tech: 'postgres:16.4-alpine · Versioned Migrations · ACID Transactions',
+          desc: 'Durable telemetry observations with UNIQUE (meter_id, observation_id) dedup, composite (dma_id, metric, observed_at DESC) index, leak_incidents, incident_commands, audit_events, and notification_outbox.',
         },
         {
-          name: 'Testability Seams & Test Doubles',
-          tech: 'FixedClock & RecordingAuditSink (L5 İdarəolunanlıq)',
-          desc: 'Deterministik vaxt manipulyasiyası (2026-10-20 03:00 Bakı vaxtı), audit və bildiriş casusu (spy/recording double) ilə tam müşahidəolunanlıq.',
+          name: 'Interchangeable Repository Adapters',
+          tech: 'PostgresIncidentRepository · InMemory · ValidatedJsonFixture',
+          desc: 'All three adapters satisfy identical port conformance tests (expectedVersion CAS, deep-clone isolation, command idempotency, atomic rollback on injected failure).',
         },
         {
-          name: 'Reaktiv Vəziyyət Qatı (Domain Composition Root)',
-          tech: 'React 19 Context · DomainProvider',
-          desc: 'Domen nüvəsini tablararası vəziyyət sıfırlanmasından qoruyur. DMA seçimi, nasazlıq inyeksiyaları və hadisə keçidləri tablar dəyişdikdə itmir.',
+          name: 'React 19 Dashboard (Integrated & Demo Modes)',
+          tech: 'React 19 · TypeScript 5.7 · Tailwind CSS',
+          desc: 'Wired directly to /v1 HTTP API with explicit loading/empty/stale/409/403/503 states (no silent fallback) plus an isolated Static Demo / Test Seam mode.',
         },
         {
-          name: 'Yoxlanmış Müstəqil Müqavilələr',
-          tech: 'OpenAPI 3.0.3 · Protobuf v3 · TimescaleDB DDL',
-          desc: 'Markdown daxilindən çıxarılmış, müstəqil fayl kimi contracts/ qovluğunda saxlanılan, mTLS və canal_network_id ilə təchiz edilmiş spesifikasiyalar.',
+          name: 'Verified Contracts & CI Checks',
+          tech: 'OpenAPI 3.1.0 · protoc-compiled Protobuf v3 · SQL Migrations',
+          desc: 'OpenAPI validated against live HTTP tests; telemetry.proto compiled via real protoc with measured 60-record fixture size; PostgreSQL 16 migrations executed in CI & local tests.',
         },
       ],
     },

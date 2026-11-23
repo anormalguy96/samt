@@ -10,6 +10,11 @@ export interface AuditEvent {
   sourceComponent: string;
   severity: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS';
   message: string;
+  actorId?: string;
+  actorRole?: string;
+  correlationId?: string;
+  dmaId?: string;
+  incidentId?: string;
   metadata?: Record<string, unknown>;
 }
 

@@ -1,8 +1,6 @@
 /**
  * Clock Port (Lecture 5: Controllability & Observability)
  * Decouples domain time logic from system non-determinism (Date.now()).
- * Allows automated test suites and time-travel controls to test night-flow (02:00-04:00 AM)
- * deterministically during daylight laboratory hours.
  */
 
 export interface Clock {
@@ -19,7 +17,11 @@ export class FixedClock implements Clock {
   private currentTime: Date;
 
   constructor(initialTime: Date | string | number = '2026-10-20T03:00:00+04:00') {
-    this.currentTime = new Date(initialTime);
+    const parsed = new Date(initialTime);
+    if (!Number.isFinite(parsed.getTime())) {
+      throw new Error(`Invalid FixedClock initialTime: ${String(initialTime)}`);
+    }
+    this.currentTime = parsed;
   }
 
   now(): Date {
@@ -27,7 +29,11 @@ export class FixedClock implements Clock {
   }
 
   setTime(time: Date | string | number): void {
-    this.currentTime = new Date(time);
+    const parsed = new Date(time);
+    if (!Number.isFinite(parsed.getTime())) {
+      throw new Error(`Invalid FixedClock time: ${String(time)}`);
+    }
+    this.currentTime = parsed;
   }
 
   advanceMinutes(minutes: number): void {

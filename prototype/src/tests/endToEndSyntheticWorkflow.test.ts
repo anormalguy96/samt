@@ -1,243 +1,261 @@
 import { describe, it, expect } from 'vitest';
 import { FixedClock } from '../domain/ports/Clock';
 import { StandardMeterRegistry } from '../domain/adapters/StandardMeterRegistry';
-import { TelemetryValidator } from '../domain/telemetry/validation';
-import { integrateFlowVolume, type FlowSample } from '../domain/balance/flowIntegration';
-import { calculateWaterBalance } from '../domain/balance/waterBalance';
-import { evaluateMinimumNightFlow } from '../domain/nightflow/nightWindowFilter';
-import { transitionIncident } from '../domain/incident/incidentStateMachine';
 import { InMemoryIncidentRepository } from '../domain/adapters/InMemoryIncidentRepository';
-import { RecordingAuditSink } from '../domain/adapters/RecordingAuditSink';
-import { allocateConstrainedWater } from '../domain/allocation/constrainedAllocation';
-import { estimateIllustrativeSavings } from '../domain/savings/illustrativeSavings';
-import type { Incident } from '../domain/ports/IncidentPort';
+import {
+  IngestTelemetryBatchUseCase,
+  type ITelemetryBatchPersistence,
+} from '../application/IngestTelemetryBatchUseCase';
+import {
+  AssessDmaHydraulicsUseCase,
+  type DmaMetadata,
+  type IIncidentCreationStore,
+  type ITelemetryQueryReader,
+} from '../application/AssessDmaHydraulicsUseCase';
+import { ExecuteIncidentTransitionUseCase } from '../application/ExecuteIncidentTransitionUseCase';
 import type { TelemetryObservation } from '../domain/ports/TelemetryPort';
+import type { AuditEvent } from '../domain/ports/AuditPort';
+import type { CommandOutboxMessage, Incident } from '../domain/ports/IncidentPort';
 
-describe('Connected End-to-End Synthetic DMA Workflow (Principal Course Demonstration)', () => {
-  it('executes full pipeline: ingest -> validate -> balance -> MNF -> incident -> repair -> verification -> allocation', async () => {
-    // 0. Setup injectable dependencies (Seams & Ports)
-    const clock = new FixedClock('2026-10-20T03:00:00+04:00'); // Set time to nocturnal window 03:00 AZT
+describe('Connected Shared-Use-Case Synthetic Workflow (SAMT v1.1.0)', () => {
+  it('runs shared use cases end-to-end with DMA isolation, historical replay guard, and authoritative verification', async () => {
+    const clock = new FixedClock('2026-10-19T23:55:00Z'); // 03:55 AZT on 2026-10-20
     const registry = new StandardMeterRegistry();
-    const validator = new TelemetryValidator(clock, registry, { clientCertificateValid: true });
     const incidentRepo = new InMemoryIncidentRepository();
-    const auditSink = new RecordingAuditSink();
+    const storedObs: TelemetryObservation[] = [];
+    const seenKeys = new Set<string>();
+    const audits: AuditEvent[] = [];
+    const outbox: CommandOutboxMessage[] = [];
 
-    const dmaId = 'DMA-YASAMAL-04';
-    const baselineMnf = 25.0; // Baseline dry-weather MNF is 25.0 m³/h
-
-    // 1. Ingest raw edge observations
-    const inletObs: TelemetryObservation = {
-      observationId: 'OBS-YAS-001',
-      deviceId: 'GW-YAS-01',
-      meterId: 'FM-YAS-INLET-01',
-      dmaId,
-      metric: 'FLOW_M3H',
-      value: 68.4, // Spiked flow during 03:00 AM window!
-      observedAt: clock.now(),
-      receivedAt: clock.now(),
-      quality: 'VALID',
-      batteryVolts: 3.6,
-    };
-    const outletObs: TelemetryObservation = {
-      observationId: 'OBS-YAS-002',
-      deviceId: 'GW-YAS-02',
-      meterId: 'FM-YAS-OUTLET-01',
-      dmaId,
-      metric: 'FLOW_M3H',
-      value: 20.0,
-      observedAt: clock.now(),
-      receivedAt: clock.now(),
-      quality: 'VALID',
-      batteryVolts: 3.5,
-    };
-
-    // 2. Validate observations (DbC Preconditions)
-    const valInlet = validator.validate(inletObs);
-    const valOutlet = validator.validate(outletObs);
-    expect(valInlet.accepted).toBe(true);
-    expect(valOutlet.accepted).toBe(true);
-
-    // 3. Trapezoidal volume integration over 15-minute window [03:00, 03:15)
-    const windowStart = clock.now();
-    const windowEnd = new Date(windowStart.getTime() + 15 * 60 * 1000);
-
-    const inletSamples: FlowSample[] = [
-      { timestamp: windowStart, flowM3h: inletObs.value },
-      { timestamp: windowEnd, flowM3h: inletObs.value },
-    ];
-    const outletSamples: FlowSample[] = [
-      { timestamp: windowStart, flowM3h: outletObs.value },
-      { timestamp: windowEnd, flowM3h: outletObs.value },
-    ];
-
-    const inletVol = integrateFlowVolume(inletSamples, { windowStart, windowEnd });
-    const outletVol = integrateFlowVolume(outletSamples, { windowStart, windowEnd });
-
-    // 68.4 m³/h * 0.25 h = 17.1 m³
-    expect(inletVol.totalVolumeM3).toBeCloseTo(17.1, 1);
-    // 20.0 m³/h * 0.25 h = 5.0 m³
-    expect(outletVol.totalVolumeM3).toBeCloseTo(5.0, 1);
-
-    // 4. Calculate boundary water balance
-    const balance = calculateWaterBalance({
-      dmaId,
-      dmaName: 'Yasamal DMA-04',
-      windowStart,
-      windowEnd,
-      inletContributions: [
-        {
-          meterId: inletObs.meterId,
-          meterName: 'Inlet',
-          role: 'INLET',
-          volumeM3: inletVol.totalVolumeM3,
-          averageFlowM3h: inletVol.averageFlowM3h,
-          coverageRatio: inletVol.coverageRatio,
-        },
-      ],
-      outletContributions: [
-        {
-          meterId: outletObs.meterId,
-          meterName: 'Outlet',
-          role: 'OUTLET',
-          volumeM3: outletVol.totalVolumeM3,
-          averageFlowM3h: outletVol.averageFlowM3h,
-          coverageRatio: outletVol.coverageRatio,
-        },
-      ],
-      authorizedBilledConsumptionM3: 3.0,
-      storageChangeM3: 0.0,
-    });
-
-    // Net residual: 17.1 - 5.0 - 3.0 = 9.1 m³ (excess loss!)
-    expect(balance.signedResidualM3).toBeCloseTo(9.1, 1);
-    expect(balance.status).toBe('CRITICAL_LEAK');
-
-    // 5. Evaluate Minimum Night Flow (MNF) evidence
-    const mnfEvaluation = evaluateMinimumNightFlow(inletSamples, baselineMnf);
-    expect(mnfEvaluation.isWithinNightWindow).toBe(true);
-    expect(mnfEvaluation.isAnomalyDetected).toBe(true);
-    expect(mnfEvaluation.excessNightFlowM3h).toBeGreaterThan(30.0);
-
-    // 6. Create Incident from detected hydraulic anomaly
-    const newIncident: Incident = {
-      incidentId: 'INC-WORKFLOW-YAS-001',
-      dmaId,
-      pipeSegmentId: 'PIPE-YAS-4412',
-      title: 'Yasamal H. Cavid prospekti Boru Qəzası (MNF Sıçrayışı)',
-      detectedAt: clock.now(),
-      state: 'DETECTED',
-      severity: 'CRITICAL',
-      estimatedLossM3h: mnfEvaluation.excessNightFlowM3h,
-      version: 1,
-    };
-    await incidentRepo.save(newIncident);
-    auditSink.record({
-      id: 'aud-001',
-      timestamp: clock.now(),
-      eventType: 'INCIDENT_DETECTED',
-      sourceComponent: 'MnfEvaluationEngine',
-      severity: 'ERROR',
-      message: `Critical leak detected: +${mnfEvaluation.excessNightFlowM3h.toFixed(1)} m³/h above baseline`,
-    });
-
-    // 7. Dispatch & Assign Field Crew
-    const assigned = transitionIncident(
-      newIncident,
-      {
-        type: 'ASSIGN',
-        crew: {
-          crewId: 'CREW-03',
-          crewName: 'Bakı Qəza-Bərpa Briqadası #3',
-          crewPhone: '+994 50 234-56-78',
-          role: 'Baş Mühəndis: Kamran Əliyev',
-          etaMinutes: 25,
-          assignedAt: clock.now(),
-        },
+    const persistence: ITelemetryBatchPersistence = {
+      async persistObservations(observations, _corId, auditEvent) {
+        const insertedObservationKeys = new Set<string>();
+        const duplicateObservationKeys = new Set<string>();
+        for (const obs of observations) {
+          const k = `${obs.meterId}::${obs.observationId}`;
+          if (seenKeys.has(k)) {
+            duplicateObservationKeys.add(k);
+          } else {
+            seenKeys.add(k);
+            storedObs.push(obs);
+            insertedObservationKeys.add(k);
+          }
+        }
+        if (auditEvent) audits.push(auditEvent);
+        return { insertedObservationKeys, duplicateObservationKeys };
       },
-      clock
-    );
-    expect(assigned.success).toBe(true);
-    await incidentRepo.update(assigned.incident);
-    await auditSink.notify(assigned.incident.crewAssignment!.crewPhone, 'Dispatched to Yasamal DMA-04', 'CRITICAL');
+    };
 
-    // 8. Crew Arrives & Records Repair Evidence
-    clock.advanceMinutes(30);
-    const inRepair = transitionIncident(assigned.incident, { type: 'START_REPAIR', technicianId: 'TECH-KAMRAN' }, clock);
-    expect(inRepair.success).toBe(true);
-    await incidentRepo.update(inRepair.incident);
+    const dmas = new Map<string, DmaMetadata>([
+      [
+        'DMA-YASAMAL-04',
+        {
+          dmaId: 'DMA-YASAMAL-04',
+          name: 'Yasamal DMA-04',
+          administrativeDistrict: 'Yasamal',
+          baselineMnfM3h: 25.0,
+          baselinePressureBar: 4.0,
+          expectedSampleIntervalSec: 15,
+        },
+      ],
+      [
+        'DMA-NASIMI-02',
+        {
+          dmaId: 'DMA-NASIMI-02',
+          name: 'Nasimi DMA-02',
+          administrativeDistrict: 'Nasimi',
+          baselineMnfM3h: 34.0,
+          baselinePressureBar: 4.0,
+          expectedSampleIntervalSec: 15,
+        },
+      ],
+    ]);
 
-    clock.advanceMinutes(45);
-    const repaired = transitionIncident(
-      inRepair.incident,
-      {
+    const reader: ITelemetryQueryReader = {
+      async getDma(dmaId) {
+        return dmas.get(dmaId);
+      },
+      async getFlowObservationsForDma(dmaId, from, to, options) {
+        return storedObs.filter(
+          (o) =>
+            o.dmaId === dmaId &&
+            o.metric === 'FLOW_M3H' &&
+            o.observedAt >= from &&
+            o.observedAt <= to &&
+            (!options?.excludeHistoricalReplay || o.ingestionMode === 'LIVE')
+        );
+      },
+    };
+
+    const creator: IIncidentCreationStore = {
+      async getActiveIncidentsByDma(dmaId) {
+        return (await incidentRepo.getByDma(dmaId)).filter(
+          (i) => i.state !== 'CLOSED' && i.state !== 'FALSE_ALARM'
+        );
+      },
+      async createIncidentAtomic(incident: Incident, auditEvent, outboxMessage) {
+        await incidentRepo.save(incident);
+        audits.push(auditEvent);
+        if (outboxMessage) outbox.push(outboxMessage);
+        return incident;
+      },
+    };
+
+    const ingestUc = new IngestTelemetryBatchUseCase(clock, registry, persistence);
+    const assessUc = new AssessDmaHydraulicsUseCase(clock, registry, reader, creator);
+    const transitionUc = new ExecuteIncidentTransitionUseCase(incidentRepo, clock);
+
+    // 1. Ingest bounded historical replay (10 samples 12h ago) -> persisted, MUST NOT create live incident!
+    const histStart = new Date(clock.now().getTime() - 24 * 3600 * 1000); // Previous night [02:00..03:50 AZT]
+    const histBatch = await ingestUc.execute({
+      authenticatedDeviceId: 'GW-YAS-01',
+      actorRole: 'device',
+      transmittedAt: clock.now(),
+      measurements: Array.from({ length: 10 }, (_, i) => ({
+        observationId: `hist-${i}`,
+        deviceId: 'GW-YAS-01',
+        meterId: 'FM-YAS-INLET-01',
+        dmaId: 'DMA-YASAMAL-04',
+        metric: 'FLOW_M3H',
+        unit: 'm3/h',
+        value: 80.0,
+        observedAt: new Date(histStart.getTime() - (10 - i) * 10 * 60 * 1000),
+      })),
+    });
+    expect(histBatch.acceptedCount).toBe(10);
+    expect(histBatch.historicalCount).toBe(10);
+    expect(histBatch.triggeredLiveDispatch).toBe(false);
+
+    const histAssess = await assessUc.assessAndOpenIncidentIfNeeded({
+      dmaId: 'DMA-YASAMAL-04',
+      localDateYmd: '2026-10-19',
+      actor: { actorId: 'disp-1', role: 'dispatcher' },
+      correlationId: 'cor-hist',
+    });
+    expect(histAssess?.incidentCreated).toBe(false);
+    expect(outbox).toHaveLength(0);
+
+    // 2. Ingest LIVE anomalous nocturnal readings across [02:00, 03:50] AZT for DMA-YASAMAL-04
+    // Advance clock along the night window so readings are LIVE
+    const nightStartUtc = new Date('2026-10-19T22:00:00Z');
+    for (let i = 0; i < 12; i++) {
+      const t = new Date(nightStartUtc.getTime() + i * 10 * 60 * 1000);
+      clock.setTime(t);
+      const res = await ingestUc.execute({
+        authenticatedDeviceId: 'GW-YAS-01',
+        actorRole: 'device',
+        transmittedAt: t,
+        measurements: [
+          {
+            observationId: `live-in-${i}`,
+            deviceId: 'GW-YAS-01',
+            meterId: 'FM-YAS-INLET-01',
+            dmaId: 'DMA-YASAMAL-04',
+            metric: 'FLOW_M3H',
+            unit: 'm3/h',
+            value: 68.4,
+            observedAt: t,
+          },
+        ],
+      });
+      expect(res.liveCount).toBe(1);
+    }
+
+    // 3. Assess DMA-YASAMAL-04 -> creates DETECTED incident; DMA-NASIMI-02 stays empty!
+    const liveAssess = await assessUc.assessAndOpenIncidentIfNeeded({
+      dmaId: 'DMA-YASAMAL-04',
+      localDateYmd: '2026-10-20',
+      actor: { actorId: 'disp-1', role: 'dispatcher' },
+      correlationId: 'cor-live',
+    });
+    expect(liveAssess?.incidentCreated).toBe(true);
+    const incId = liveAssess!.incident!.incidentId;
+    expect(await incidentRepo.getByDma('DMA-NASIMI-02')).toHaveLength(0);
+
+    // 4. Transition DETECTED -> ASSIGNED -> IN_REPAIR -> REPAIRED -> VERIFIED -> CLOSED via shared use case
+    const dispatcher = { actorId: 'disp-1', role: 'dispatcher' as const };
+    const r1 = await transitionUc.execute({
+      incidentId: incId,
+      commandId: 'cmd-1',
+      expectedVersion: 1,
+      actor: dispatcher,
+      event: {
+        type: 'ASSIGN',
+        crew: { crewId: 'C1', crewName: 'Crew 1', crewPhone: '+994-50-000', role: 'Lead', etaMinutes: 20 },
+      },
+    });
+    expect(r1.ok).toBe(true);
+
+    const r2 = await transitionUc.execute({
+      incidentId: incId,
+      commandId: 'cmd-2',
+      expectedVersion: 2,
+      actor: dispatcher,
+      event: { type: 'START_REPAIR', technicianId: 'TECH-1' },
+    });
+    expect(r2.ok).toBe(true);
+
+    const r3 = await transitionUc.execute({
+      incidentId: incId,
+      commandId: 'cmd-3',
+      expectedVersion: 3,
+      actor: dispatcher,
+      event: {
         type: 'RECORD_REPAIR_EVIDENCE',
         evidence: {
-          technicianId: 'TECH-KAMRAN',
-          repairMethod: 'Kompozit Klemma (Ø200mm) Quraşdırıldı',
-          clampType: 'Mufta Kraun Ø200',
-          acousticFreqHz: 15,
-          photoFixtureRef: 'fixture://photos/repair-yas-4412.webp',
-          completedAt: clock.now(),
-          technicianNotes: 'Qəza ləğv edildi, boru təzyiq altına alındı.',
+          technicianId: 'TECH-1',
+          repairMethod: 'Clamp Ø200mm',
+          photoFixtureRef: 'fixture://photos/yas-01.webp',
+          technicianNotes: 'Sealed',
         },
       },
-      clock
-    );
-    expect(repaired.success).toBe(true);
-    expect(repaired.incident.state).toBe('REPAIRED');
-    await incidentRepo.update(repaired.incident);
-
-    // 9. Post-Repair Verification Evaluation (True evaluation, not click-through!)
-    // Post-repair nocturnal flow drops back to 26.2 m³/h (within 1.05 * 25.0 baseline = 26.25 m³/h)
-    const verified = transitionIncident(
-      repaired.incident,
-      {
-        type: 'EVALUATE_VERIFICATION',
-        evaluation: {
-          evaluatedAt: clock.now(),
-          preRepairMnfM3h: 68.4,
-          postRepairMnfM3h: 26.2,
-          baselineMnfM3h: 25.0,
-          verifiedLossDropM3h: 42.2,
-          isSuccessful: true,
-          reason: 'Post-repair nocturnal flow (26.2 m³/h) restored to within baseline tolerance',
-        },
-      },
-      clock
-    );
-    expect(verified.success).toBe(true);
-    expect(verified.incident.state).toBe('VERIFIED');
-    await incidentRepo.update(verified.incident);
-
-    // 10. Illustrative Savings Estimation (Pressure Normalized)
-    const savings = estimateIllustrativeSavings({
-      baselineFlowM3h: 68.4,
-      baselinePressureBar: 4.8,
-      postRepairFlowM3h: 26.2,
-      postRepairPressureBar: 4.6, // Slight pressure stabilization
-      leakageExponent: 0.5,
-      illustrativeTariffAznM3: 0.40,
     });
-    expect(savings.isLeakReductionVerified).toBe(true);
-    expect(savings.pressureAdjustedHourlySavingsM3h).toBeGreaterThan(38.0);
-    expect(savings.dailySavingsM3).toBeGreaterThan(900.0);
+    expect(r3.ok).toBe(true);
 
-    // 11. Complete Standalone Allocation Run
-    const allocationResult = allocateConstrainedWater(
-      [
-        { id: '1', name: 'Gəncə', region: 'K1', demandM3: 140, weight: 0.9, canalCapacityM3: 150 },
-        { id: '2', name: 'Aran', region: 'K2', demandM3: 210, weight: 0.85, canalCapacityM3: 220 },
-        { id: '3', name: 'Abşeron', region: 'K3', demandM3: 85, weight: 0.75, canalCapacityM3: 100 },
-        { id: '4', name: 'Qarabağ', region: 'K4', demandM3: 160, weight: 0.95, canalCapacityM3: 180 },
-        { id: '5', name: 'Muğan', region: 'K5', demandM3: 110, weight: 0.7, canalCapacityM3: 120 },
-      ],
-      900 // Supply 900 for demand 705
-    );
-    expect(allocationResult.totalAllocatedM3).toBe(705);
-    expect(allocationResult.unmetDemandM3).toBe(0);
+    const r4 = await transitionUc.execute({
+      incidentId: incId,
+      commandId: 'cmd-4',
+      expectedVersion: 4,
+      actor: dispatcher,
+      event: {
+        type: 'EVALUATE_VERIFICATION',
+        evidence: {
+          baselineMnfM3h: 25.0,
+          preRepairWindow: {
+            windowStart: new Date('2026-10-19T22:00:00Z'),
+            windowEnd: new Date('2026-10-20T00:00:00Z'),
+            sampleCount: 12,
+            coverageRatio: 0.92,
+            mnfM3h: 68.4,
+            avgPressureBar: 4.0,
+            provenance: 'PERSISTED_LIVE_WINDOW',
+          },
+          postRepairWindow: {
+            windowStart: new Date('2026-10-20T22:00:00Z'),
+            windowEnd: new Date('2026-10-21T00:00:00Z'),
+            sampleCount: 12,
+            coverageRatio: 0.92,
+            mnfM3h: 26.2,
+            avgPressureBar: 4.0,
+            provenance: 'PERSISTED_POST_WINDOW',
+          },
+        },
+      },
+    });
+    expect(r4.ok).toBe(true);
+    if (r4.ok) expect(r4.incident.state).toBe('VERIFIED');
 
-    // Verify spy recorded all interactions
-    expect(auditSink.getEvents().length).toBeGreaterThanOrEqual(1);
-    expect(auditSink.getNotifications().length).toBe(1);
+    const r5 = await transitionUc.execute({
+      incidentId: incId,
+      commandId: 'cmd-5',
+      expectedVersion: 5,
+      actor: dispatcher,
+      event: { type: 'CLOSE' },
+    });
+    expect(r5.ok).toBe(true);
+    if (r5.ok) {
+      expect(r5.incident.state).toBe('CLOSED');
+      expect(r5.incident.closedBy).toBe('disp-1');
+    }
   });
 });

@@ -1,34 +1,58 @@
-openapi: 3.0.3
+openapi: 3.1.0
 info:
   title: SAMT Core Water Operations & Allocation API
+  version: 1.1.0
+  summary: Local persistent operational prototype API for synthetic DMA telemetry, hydraulic balancing, incident workflow, and constrained allocation.
   description: >
-    Proposed RESTful contract for SAMT (Centralized Water Operations Analytics).
-    Governs edge batch ingestion, 15-minute hydraulic mass balancing, nocturnal
-    Minimum Night Flow (MNF) analytics, incident lifecycle management, and constrained
-    agricultural water allocation.
-  version: 1.0.1
-  contact:
-    name: SƏMT System Architecture Group
-    email: architecture@semt.gov.az
-
+    SAMT v1.1.0 operational HTTP API contract. All operational routes live under `/v1`.
+    Local authentication uses environment-configured development tokens (`BearerAuth` for
+    viewer/dispatcher roles and `DeviceTokenAuth` for bound gateway telemetry ingestion).
+    Hardware Mutual TLS 1.3 (X.509 client certificates) is documented as a separate future
+    target-architecture transport option and is NOT active in the v1.1.0 local runtime.
 servers:
-  - url: https://api.semt.gov.az/v1
-    description: Proposed Sovereign Government Cloud (Hökumət Buludu) Gateway
   - url: http://localhost:8080/v1
-    description: Local Prototype Mock Server
+    description: Local SAMT v1.1.0 Node/TypeScript HTTP Service (Active Runtime)
+  - url: https://example.invalid/samt-target/v1
+    description: Non-active placeholder example for future production deployment (NOT live)
+
+x-target-architecture-auth:
+  note: >
+    In a future production deployment, edge gateways may terminate Mutual TLS 1.3 (X.509)
+    at a dedicated ingress proxy and map verified client certificate SANs to device_id headers.
+    This target mechanism is intentionally separated from v1.1.0 local dev token auth.
 
 paths:
-  /telemetry/batch:
-    post:
-      summary: Ingest batched edge sensor readings
-      description: >
-        Receives batched observations from District Metered Area (DMA) edge loggers.
-        Enforces clock-drift checks (|t_batch - t_server| <= 15 min unless historical replay flag is set),
-        validates meter identity in registry, and stores records for downstream mass balancing.
-      operationId: ingestTelemetryBatch
+  /dmas:
+    get:
+      summary: List seeded DMAs and bound network meters
+      operationId: listDmas
       security:
         - BearerAuth: []
-        - MutualTLS: []
+      responses:
+        '200':
+          description: Seeded DMAs and active/inactive meter registry entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DmaListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /telemetry/batch:
+    post:
+      summary: Ingest batched synthetic edge sensor readings (device-restricted)
+      description: >
+        Synchronously validates and persists a bounded batch (1..500 readings) to PostgreSQL
+        with durable per-meter deduplication `(meter_id, observation_id)`. Server derives
+        `received_at` and live vs. bounded historical replay mode (`<= 72h`). Historical
+        replays are persisted without triggering fresh live incident dispatch.
+      operationId: ingestTelemetryBatch
+      security:
+        - DeviceTokenAuth: []
       requestBody:
         required: true
         content:
@@ -36,38 +60,37 @@ paths:
             schema:
               $ref: '#/components/schemas/TelemetryBatchRequest'
       responses:
-        '202':
-          description: Batch accepted for asynchronous stream processing
+        '200':
+          description: Batch committed synchronously (fully accepted, partially accepted, or duplicate-only)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/BatchIngestResponse'
         '400':
-          description: Invalid payload structure or out-of-bounds parameter
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+          $ref: '#/components/responses/BadRequest'
         '401':
-          description: Missing or untrusted client certificate / bearer token
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '422':
-          description: Severe clock skew or duplicate batch identifier
+          description: All readings in batch were rejected or quarantined by validation/time policies
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/BatchIngestResponse'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /dma/{dma_id}/balance:
     get:
-      summary: Retrieve 15-minute hydraulic mass balance for a DMA
+      summary: Compute per-meter integrated hydraulic balance for a DMA window
       description: >
-        Computes boundary mass balance (Inflow - Outflow - Authorized Consumption - Storage Delta)
-        over the specified rolling window. Preserves signed residuals and data coverage estimates.
+        Loads persisted per-meter flow readings from PostgreSQL, integrates each meter
+        independently via clipped trapezoidal integration, sums boundary volumes, and
+        computes the signed unexplained residual. Does not label raw residuals as confirmed NRW.
       operationId: getDmaMassBalance
+      security:
+        - BearerAuth: []
       parameters:
         - name: dma_id
           in: path
@@ -75,76 +98,286 @@ paths:
           schema:
             type: string
             pattern: '^[A-Z0-9_-]{4,32}$'
-            example: "DMA-YASAMAL-04"
-        - name: window_hours
+            examples: ['DMA-YASAMAL-04']
+        - name: window_start
           in: query
           required: false
           schema:
-            type: integer
-            minimum: 1
-            maximum: 720
-            default: 24
+            type: string
+            format: date-time
+        - name: window_end
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: authorized_billed_m3
+          in: query
+          required: false
+          schema:
+            type: number
+            minimum: 0
+            default: 0
+        - name: authorized_unbilled_m3
+          in: query
+          required: false
+          schema:
+            type: number
+            minimum: 0
+            default: 0
+        - name: storage_change_m3
+          in: query
+          required: false
+          description: 'Signed storage change in m3 (+ = storage refilled inside DMA, - = drained into DMA).'
+          schema:
+            type: number
+            default: 0
+        - name: boundary_policy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [BOUNDED_HOLD, STRICT_INTERIOR]
+            default: BOUNDED_HOLD
       responses:
         '200':
-          description: Mass balance calculation result
+          description: Per-meter integrated water balance result
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/DmaBalanceResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
-          description: DMA not found in network topology
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+          $ref: '#/components/responses/NotFound'
         '503':
-          description: Upstream storage replica lag or insufficient coverage
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /dma/{dma_id}/night-flow:
     get:
-      summary: Retrieve nocturnal Minimum Night Flow (MNF) analysis
-      description: >
-        Analyzes flow readings strictly within the Asia/Baku [02:00, 04:00) window.
-        Calculates 5th-percentile night flow against historical dry-weather baseline.
+      summary: Evaluate Asia/Baku [02:00, 04:00) Minimum Night Flow (MNF) from persisted readings
       operationId: getDmaNightFlow
+      security:
+        - BearerAuth: []
       parameters:
         - name: dma_id
           in: path
           required: true
           schema:
             type: string
-            example: "DMA-YASAMAL-04"
+            examples: ['DMA-YASAMAL-04']
         - name: date
           in: query
           required: false
+          description: Local Asia/Baku calendar date (YYYY-MM-DD).
           schema:
             type: string
             format: date
-            example: "2026-10-20"
+            examples: ['2026-10-20']
       responses:
         '200':
-          description: MNF evaluation result
+          description: Nocturnal MNF evaluation result (including coverage sufficiency status)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NightFlowResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
-          description: DMA not found
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /dma/{dma_id}/assess:
+    post:
+      summary: Assess persisted LIVE nocturnal telemetry and open a reviewable incident if anomalous
+      description: >
+        Dispatcher-only operation. Evaluates LIVE persisted telemetry (excluding HISTORICAL_REPLAY)
+        and atomically creates a reviewable DETECTED incident, durable audit record, and outbox
+        notification if coverage and anomaly thresholds are satisfied and no active incident exists.
+      operationId: assessDmaOperationalState
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: dma_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                date:
+                  type: string
+                  format: date
+                pipe_segment_id:
+                  type: string
+                  maxLength: 64
+      responses:
+        '200':
+          description: Assessment completed; no new incident created (nominal, insufficient coverage, or active incident exists)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessDmaResponse'
+        '201':
+          description: Reviewable DETECTED incident created and committed atomically
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssessDmaResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /incidents:
+    get:
+      summary: List persisted leak incidents in deterministic order (detected_at DESC, incident_id ASC)
+      operationId: listIncidents
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: dma_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/IncidentState'
+      responses:
+        '200':
+          description: Persisted incident list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [incidents]
+                properties:
+                  incidents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IncidentResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /incidents/{incident_id}:
+    get:
+      summary: Retrieve one persisted incident and its durable audit trail
+      operationId: getIncidentById
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: incident_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Persisted incident and associated audit events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [incident, audit_events]
+                properties:
+                  incident:
+                    $ref: '#/components/schemas/IncidentResponse'
+                  audit_events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditEventResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /incidents/{incident_id}/transition:
+    post:
+      summary: Execute a guarded, idempotent, optimistically-locked incident state transition
+      description: >
+        Dispatcher-only command. Requires `expected_version` and a stable `command_id`
+        (in body or `Idempotency-Key` header). Commits incident mutation, version increment,
+        command idempotency ledger, audit event, and optional notification outbox row in
+        a single PostgreSQL ACID transaction. Authoritative actor and verification verdicts
+        are computed exclusively server-side.
+      operationId: transitionIncident
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: incident_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransitionRequest'
+      responses:
+        '200':
+          description: Transition committed (or replayed idempotently)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransitionResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Optimistic concurrency version conflict or commandId payload mismatch
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Insufficient verification evidence (incident remains in REPAIRED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
   /allocation/solve:
     post:
-      summary: Execute constrained regional water allocation
-      description: >
-        Computes a deterministic progressive-filling allocation plan across agricultural
-        and municipal consumers subject to canal capacity and available reservoir supply.
+      summary: Execute constrained regional water allocation (progressive-filling heuristic)
       operationId: solveAllocation
       security:
         - BearerAuth: []
@@ -156,375 +389,744 @@ paths:
               $ref: '#/components/schemas/AllocationSolveRequest'
       responses:
         '200':
-          description: Feasible allocation plan computed
+          description: Deterministic allocation plan computed
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AllocationSolveResponse'
         '400':
-          description: Negative supply or invalid consumer parameters
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '422':
-          description: Infeasible minimum requirements
+          description: Infeasible minimum survival requirements
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
-  /incidents:
+  /savings/estimate:
+    post:
+      summary: Compute illustrative Torricelli pressure-normalized water savings estimate
+      operationId: estimateSavings
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SavingsEstimateRequest'
+      responses:
+        '200':
+          description: Modeled savings estimate with explicit assumptions and disclaimers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SavingsEstimateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /audit:
     get:
-      summary: List registered leak incidents
-      operationId: listIncidents
+      summary: Query persisted audit events
+      operationId: listAuditEvents
+      security:
+        - BearerAuth: []
       parameters:
         - name: dma_id
           in: query
           required: false
           schema:
             type: string
-        - name: state
+        - name: incident_id
           in: query
           required: false
           schema:
             type: string
-            enum: [DETECTED, ASSIGNED, IN_REPAIR, REPAIRED, VERIFIED, CLOSED, FALSE_ALARM]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
       responses:
         '200':
-          description: List of leak incidents
+          description: Persisted audit log entries
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/IncidentResponse'
+                type: object
+                required: [audit_events]
+                properties:
+                  audit_events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AuditEventResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
 
-  /incidents/{incident_id}/transition:
-    post:
-      summary: Execute guarded incident state machine transition
-      operationId: transitionIncident
+  /outbox:
+    get:
+      summary: Inspect transactional notification outbox entries (dispatcher only)
+      operationId: listOutbox
       security:
         - BearerAuth: []
-      parameters:
-        - name: incident_id
-          in: path
-          required: true
-          schema:
-            type: string
+      responses:
+        '200':
+          description: Notification outbox rows
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [outbox]
+                properties:
+                  outbox:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OutboxItemResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /outbox/dispatch:
+    post:
+      summary: Process due pending notification outbox rows (dispatcher only)
+      operationId: dispatchOutbox
+      security:
+        - BearerAuth: []
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/TransitionRequest'
+              type: object
+              properties:
+                ignore_schedule:
+                  type: boolean
       responses:
         '200':
-          description: State transition accepted and committed
+          description: Outbox dispatch batch summary
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/IncidentResponse'
-        '400':
-          description: Transition guard violation (missing evidence or invalid state)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Incident not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                type: object
+                required: [processed, delivered, retried, dead_lettered]
+                properties:
+                  processed: { type: integer }
+                  delivered: { type: integer }
+                  retried: { type: integer }
+                  dead_lettered: { type: integer }
+                  correlation_id: { type: string }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
 components:
   securitySchemes:
     BearerAuth:
       type: http
       scheme: bearer
-      bearerFormat: JWT
-      description: State Water Resources Agency (ADSEA) authorized dispatcher JWT
-    MutualTLS:
-      type: mutualTLS
-      description: Hardware edge device Mutual TLS 1.3 client certificate
+      description: Local development role token (`SAMT_VIEWER_TOKEN` or `SAMT_DISPATCHER_TOKEN`).
+    DeviceTokenAuth:
+      type: apiKey
+      in: header
+      name: X-Device-Token
+      description: Local development gateway token mapped server-side to an authoritative `device_id`.
+
+  responses:
+    BadRequest:
+      description: Invalid request syntax, parameter bounds, or transition guard violation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing or invalid authentication credentials
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Authenticated principal lacks permission or device binding for this operation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Requested resource was not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: PostgreSQL persistence store unavailable; writes are not acknowledged
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
 
   schemas:
+    IncidentState:
+      type: string
+      enum: [DETECTED, ASSIGNED, IN_REPAIR, REPAIRED, VERIFIED, CLOSED, FALSE_ALARM]
+
+    DmaListResponse:
+      type: object
+      required: [dmas]
+      properties:
+        dmas:
+          type: array
+          items:
+            type: object
+            required: [dma_id, name, administrative_district, baseline_mnf_m3h, baseline_pressure_bar, expected_sample_interval_sec, meters]
+            properties:
+              dma_id: { type: string }
+              name: { type: string }
+              administrative_district: { type: string }
+              baseline_mnf_m3h: { type: number }
+              baseline_pressure_bar: { type: number }
+              expected_sample_interval_sec: { type: integer }
+              meters:
+                type: array
+                items:
+                  type: object
+                  required: [meter_id, role, name, is_active, allowed_metrics, canonical_unit]
+                  properties:
+                    meter_id: { type: string }
+                    role: { type: string, enum: [INLET, OUTLET, CONSUMER, PRESSURE_MONITOR] }
+                    name: { type: string }
+                    bound_device_id: { type: [string, 'null'] }
+                    is_active: { type: boolean }
+                    allowed_metrics:
+                      type: array
+                      items: { type: string }
+                    canonical_unit: { type: string, enum: ['m3/h', 'bar', 'm'] }
+
     TelemetryBatchRequest:
       type: object
-      required:
-        - gateway_id
-        - batch_timestamp
-        - measurements
+      required: [batch_timestamp, measurements]
       properties:
         gateway_id:
           type: string
-          example: "GW-AZ-BAKU-YAS-008"
+          description: Optional envelope device identifier; if provided, must match authenticated device token.
         batch_timestamp:
           type: string
           format: date-time
+          description: Gateway transmission timestamp (`transmitted_at`).
         is_historical_replay:
           type: boolean
-          default: false
+          description: Optional caller hint; server derives live vs historical policy independently.
         measurements:
           type: array
           minItems: 1
-          maxItems: 60
+          maxItems: 500
           items:
             $ref: '#/components/schemas/SensorMeasurement'
 
     SensorMeasurement:
       type: object
-      required:
-        - observation_id
-        - meter_id
-        - dma_id
-        - metric
-        - value
-        - observed_at
+      required: [observation_id, meter_id, dma_id, metric, value, observed_at]
       properties:
-        observation_id:
-          type: string
-          example: "obs-20261020-001"
-        meter_id:
-          type: string
-          example: "FM-YAS-INLET-01"
-        dma_id:
-          type: string
-          example: "DMA-YASAMAL-04"
-        metric:
-          type: string
-          enum: [FLOW_M3H, PRESSURE_BAR, LEVEL_METERS]
-        value:
-          type: number
-          minimum: 0.0
-          example: 412.5
-        observed_at:
-          type: string
-          format: date-time
-        battery_volts:
-          type: number
-          minimum: 0.0
-          maximum: 5.0
-          example: 3.4
+        observation_id: { type: string, minLength: 1, maxLength: 128 }
+        device_id: { type: string, minLength: 1, maxLength: 64 }
+        meter_id: { type: string, minLength: 1, maxLength: 32 }
+        dma_id: { type: string, minLength: 1, maxLength: 32 }
+        metric: { type: string, enum: [FLOW_M3H, PRESSURE_BAR, LEVEL_METERS] }
+        unit: { type: string, enum: ['m3/h', 'bar', 'm'] }
+        value: { type: number }
+        observed_at: { type: string, format: date-time }
+        transmitted_at: { type: string, format: date-time }
+        battery_volts: { type: number }
 
     BatchIngestResponse:
       type: object
       required:
         - status
-        - processed_count
         - correlation_id
+        - received_at
+        - total_count
+        - accepted_count
+        - live_count
+        - historical_count
+        - duplicate_count
+        - quarantined_count
+        - rejected_count
+        - triggered_live_dispatch
+        - results
       properties:
-        status:
-          type: string
-          enum: [ACCEPTED, PARTIALLY_ACCEPTED, QUARANTINED]
-        processed_count:
-          type: integer
-          example: 16
-        correlation_id:
-          type: string
-          example: "cor-20261020-88412"
+        status: { type: string, enum: [ACCEPTED, PARTIALLY_ACCEPTED, DUPLICATE_ONLY, REJECTED] }
+        correlation_id: { type: string }
+        received_at: { type: string, format: date-time }
+        total_count: { type: integer }
+        accepted_count: { type: integer }
+        live_count: { type: integer }
+        historical_count: { type: integer }
+        duplicate_count: { type: integer }
+        quarantined_count: { type: integer }
+        rejected_count: { type: integer }
+        triggered_live_dispatch: { type: boolean }
+        results:
+          type: array
+          items:
+            type: object
+            required: [observation_id, meter_id, accepted, code, quality, ingestion_mode]
+            properties:
+              observation_id: { type: string }
+              meter_id: { type: string }
+              accepted: { type: boolean }
+              code: { type: string }
+              quality: { type: string, enum: [VALID, SUSPECT, QUARANTINED, REJECTED] }
+              ingestion_mode: { type: string, enum: [LIVE, HISTORICAL_REPLAY] }
+              reason: { type: [string, 'null'] }
 
     DmaBalanceResponse:
       type: object
       required:
         - dma_id
+        - dma_name
         - window_start
         - window_end
         - total_inflow_m3
         - total_outflow_m3
+        - measured_inflow_m3
+        - measured_outflow_m3
+        - net_boundary_flow_m3
+        - authorized_consumption_m3
+        - storage_change_m3
         - signed_residual_m3
+        - unexplained_residual_fraction
         - coverage_ratio
+        - uncertainty_m3
         - status
+        - evidence_qualification
+        - assumptions
+        - per_meter_integrations
       properties:
-        dma_id:
-          type: string
-          example: "DMA-YASAMAL-04"
-        window_start:
-          type: string
-          format: date-time
-        window_end:
-          type: string
-          format: date-time
-        total_inflow_m3:
-          type: number
-          example: 103.1
-        total_outflow_m3:
-          type: number
-          example: 67.0
-        signed_residual_m3:
-          type: number
-          example: 36.1
-        coverage_ratio:
-          type: number
-          minimum: 0.0
-          maximum: 1.0
-          example: 0.98
-        uncertainty_m3:
-          type: number
-          example: 2.4
-        status:
-          type: string
-          enum: [NOMINAL, ELEVATED_LOSS, CRITICAL_LEAK, INSUFFICIENT_DATA]
+        dma_id: { type: string }
+        dma_name: { type: string }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        total_inflow_m3: { type: number }
+        total_outflow_m3: { type: number }
+        measured_inflow_m3: { type: number }
+        measured_outflow_m3: { type: number }
+        net_boundary_flow_m3: { type: number }
+        authorized_consumption_m3: { type: number }
+        storage_change_m3: { type: number }
+        signed_residual_m3: { type: number }
+        unexplained_residual_fraction: { type: number }
+        coverage_ratio: { type: number, minimum: 0, maximum: 1 }
+        uncertainty_m3: { type: number }
+        status: { type: string, enum: [NOMINAL, ELEVATED_LOSS, CRITICAL_LEAK, INSUFFICIENT_DATA] }
+        evidence_qualification: { type: string }
+        assumptions:
+          type: array
+          items: { type: string }
+        per_meter_integrations:
+          type: array
+          items:
+            type: object
+            required: [meter_id, role, status, total_volume_m3, measured_volume_m3, estimated_boundary_volume_m3, sample_count, coverage_ratio, max_gap_seconds]
+            properties:
+              meter_id: { type: string }
+              role: { type: string }
+              status: { type: string, enum: [COMPLETE, PARTIAL_COVERAGE, INSUFFICIENT_COVERAGE, INVALID_INPUT] }
+              total_volume_m3: { type: number }
+              measured_volume_m3: { type: number }
+              estimated_boundary_volume_m3: { type: number }
+              sample_count: { type: integer }
+              coverage_ratio: { type: number }
+              max_gap_seconds: { type: number }
 
     NightFlowResponse:
       type: object
       required:
         - dma_id
+        - date_azt
+        - window_start
+        - window_end
+        - status
         - is_within_night_window
+        - sample_count
+        - coverage_ratio
         - percentile_5_flow_m3h
         - baseline_mnf_m3h
+        - anomaly_threshold_m3h
         - excess_night_flow_m3h
         - is_anomaly_detected
+        - detection_reason
+        - methodology_note
       properties:
-        dma_id:
-          type: string
-        is_within_night_window:
-          type: boolean
-        sample_count:
-          type: integer
-        percentile_5_flow_m3h:
-          type: number
-        baseline_mnf_m3h:
-          type: number
-        excess_night_flow_m3h:
-          type: number
-        is_anomaly_detected:
-          type: boolean
-        detection_reason:
-          type: string
+        dma_id: { type: string }
+        date_azt: { type: string, format: date }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        avg_pressure_bar: { type: [number, 'null'] }
+        status: { type: string, enum: [INSUFFICIENT_COVERAGE, NOMINAL, ANOMALY_DETECTED] }
+        is_within_night_window: { type: boolean }
+        sample_count: { type: integer }
+        coverage_ratio: { type: number }
+        percentile_5_flow_m3h: { type: number }
+        baseline_mnf_m3h: { type: number }
+        anomaly_threshold_m3h: { type: number }
+        excess_night_flow_m3h: { type: number }
+        is_anomaly_detected: { type: boolean }
+        detection_reason: { type: string }
+        methodology_note: { type: string }
+
+    AssessDmaResponse:
+      type: object
+      required: [dma_id, date_azt, incident_created, reason, incident, night_flow, correlation_id]
+      properties:
+        dma_id: { type: string }
+        date_azt: { type: string, format: date }
+        incident_created: { type: boolean }
+        reason: { type: string }
+        incident:
+          oneOf:
+            - $ref: '#/components/schemas/IncidentResponse'
+            - type: 'null'
+        night_flow:
+          type: object
+          required: [status, sample_count, coverage_ratio, percentile_5_flow_m3h, baseline_mnf_m3h, excess_night_flow_m3h, is_anomaly_detected]
+          properties:
+            status: { type: string }
+            sample_count: { type: integer }
+            coverage_ratio: { type: number }
+            percentile_5_flow_m3h: { type: number }
+            baseline_mnf_m3h: { type: number }
+            excess_night_flow_m3h: { type: number }
+            is_anomaly_detected: { type: boolean }
+        correlation_id: { type: string }
+
+    VerificationWindowPayload:
+      type: object
+      required: [window_start, window_end, sample_count, coverage_ratio, mnf_m3h, provenance]
+      properties:
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        sample_count: { type: integer, minimum: 0 }
+        coverage_ratio: { type: number, minimum: 0, maximum: 1 }
+        mnf_m3h: { type: number }
+        avg_pressure_bar: { type: number }
+        authorized_allowance_m3h: { type: number }
+        provenance: { type: string, minLength: 1 }
+
+    TransitionRequest:
+      oneOf:
+        - $ref: '#/components/schemas/AssignTransitionRequest'
+        - $ref: '#/components/schemas/MarkFalseAlarmTransitionRequest'
+        - $ref: '#/components/schemas/StartRepairTransitionRequest'
+        - $ref: '#/components/schemas/RecordRepairEvidenceTransitionRequest'
+        - $ref: '#/components/schemas/EvaluateVerificationTransitionRequest'
+        - $ref: '#/components/schemas/CloseTransitionRequest'
+      discriminator:
+        propertyName: event_type
+        mapping:
+          ASSIGN: '#/components/schemas/AssignTransitionRequest'
+          MARK_FALSE_ALARM: '#/components/schemas/MarkFalseAlarmTransitionRequest'
+          START_REPAIR: '#/components/schemas/StartRepairTransitionRequest'
+          RECORD_REPAIR_EVIDENCE: '#/components/schemas/RecordRepairEvidenceTransitionRequest'
+          EVALUATE_VERIFICATION: '#/components/schemas/EvaluateVerificationTransitionRequest'
+          CLOSE: '#/components/schemas/CloseTransitionRequest'
+
+    AssignTransitionRequest:
+      type: object
+      required: [event_type, expected_version, payload]
+      properties:
+        event_type: { const: ASSIGN }
+        expected_version: { type: integer, minimum: 1 }
+        command_id: { type: string, minLength: 1, maxLength: 128 }
+        payload:
+          type: object
+          required: [crew_id, crew_name, crew_phone, role, eta_minutes]
+          properties:
+            crew_id: { type: string }
+            crew_name: { type: string }
+            crew_phone: { type: string }
+            role: { type: string }
+            eta_minutes: { type: number }
+
+    MarkFalseAlarmTransitionRequest:
+      type: object
+      required: [event_type, expected_version, payload]
+      properties:
+        event_type: { const: MARK_FALSE_ALARM }
+        expected_version: { type: integer, minimum: 1 }
+        command_id: { type: string, minLength: 1, maxLength: 128 }
+        payload:
+          type: object
+          required: [reason]
+          properties:
+            reason: { type: string, minLength: 1 }
+
+    StartRepairTransitionRequest:
+      type: object
+      required: [event_type, expected_version, payload]
+      properties:
+        event_type: { const: START_REPAIR }
+        expected_version: { type: integer, minimum: 1 }
+        command_id: { type: string, minLength: 1, maxLength: 128 }
+        payload:
+          type: object
+          required: [technician_id]
+          properties:
+            technician_id: { type: string, minLength: 1 }
+            check_in_gps: { type: string }
+
+    RecordRepairEvidenceTransitionRequest:
+      type: object
+      required: [event_type, expected_version, payload]
+      properties:
+        event_type: { const: RECORD_REPAIR_EVIDENCE }
+        expected_version: { type: integer, minimum: 1 }
+        command_id: { type: string, minLength: 1, maxLength: 128 }
+        payload:
+          type: object
+          required: [technician_id, repair_method, photo_fixture_ref]
+          properties:
+            technician_id: { type: string, minLength: 1 }
+            repair_method: { type: string, minLength: 1 }
+            clamp_type: { type: string }
+            acoustic_freq_hz: { type: number }
+            photo_fixture_ref: { type: string, minLength: 1 }
+            technician_notes: { type: string }
+
+    EvaluateVerificationTransitionRequest:
+      type: object
+      required: [event_type, expected_version, payload]
+      properties:
+        event_type: { const: EVALUATE_VERIFICATION }
+        expected_version: { type: integer, minimum: 1 }
+        command_id: { type: string, minLength: 1, maxLength: 128 }
+        payload:
+          type: object
+          description: >
+            Supply either persisted nocturnal dates (`pre_repair_date` and `post_repair_date`)
+            or explicit structured window evidence (`pre_repair_window` and `post_repair_window`).
+            The server computes the verification verdict authoritatively; caller-supplied success flags are ignored.
+          properties:
+            pre_repair_date: { type: string, format: date }
+            post_repair_date: { type: string, format: date }
+            pre_repair_window:
+              $ref: '#/components/schemas/VerificationWindowPayload'
+            post_repair_window:
+              $ref: '#/components/schemas/VerificationWindowPayload'
+            baseline_mnf_m3h: { type: number }
+            leakage_exponent: { type: number, minimum: 0.5, maximum: 1.5 }
+
+    CloseTransitionRequest:
+      type: object
+      required: [event_type, expected_version]
+      properties:
+        event_type: { const: CLOSE }
+        expected_version: { type: integer, minimum: 1 }
+        command_id: { type: string, minLength: 1, maxLength: 128 }
+        payload:
+          type: object
+          properties:
+            notes: { type: string }
+
+    IncidentResponse:
+      type: object
+      required: [incident_id, dma_id, title, detected_at, state, severity, estimated_loss_m3h, version]
+      properties:
+        incident_id: { type: string }
+        dma_id: { type: string }
+        pipe_segment_id: { type: [string, 'null'] }
+        title: { type: string }
+        detected_at: { type: string, format: date-time }
+        state:
+          $ref: '#/components/schemas/IncidentState'
+        severity: { type: string, enum: [LOW, MEDIUM, CRITICAL, EMERGENCY] }
+        estimated_loss_m3h: { type: number }
+        version: { type: integer, minimum: 1 }
+        crew_assignment: { type: [object, 'null'] }
+        repair_evidence: { type: [object, 'null'] }
+        verification_result: { type: [object, 'null'] }
+        closed_at: { type: [string, 'null'], format: date-time }
+        closed_by: { type: [string, 'null'] }
+        false_alarm_reason: { type: [string, 'null'] }
+
+    TransitionResponse:
+      type: object
+      required: [incident, transition_description, idempotent_replay, correlation_id]
+      properties:
+        incident:
+          $ref: '#/components/schemas/IncidentResponse'
+        transition_description: { type: string }
+        idempotent_replay: { type: boolean }
+        correlation_id: { type: string }
 
     AllocationSolveRequest:
       type: object
-      required:
-        - region_id
-        - available_water_m3
-        - canal_network_id
-        - consumers
+      required: [region_id, canal_network_id, available_water_m3, consumers]
       properties:
-        region_id:
-          type: string
-          example: "REG-KUR-ARAS-03"
-        canal_network_id:
-          type: string
-          example: "CANAL-NET-SHIRVAN-01"
-        available_water_m3:
-          type: number
-          minimum: 0.0
-          example: 610.0
+        region_id: { type: string }
+        canal_network_id: { type: string }
+        available_water_m3: { type: number, minimum: 0 }
+        volume_unit: { type: string, enum: [THOUSAND_M3, M3], default: THOUSAND_M3 }
+        delivery_horizon_hours: { type: integer, minimum: 1, default: 24 }
+        infeasible_minimums_policy: { type: string, enum: [REJECT, PRORATE], default: REJECT }
         consumers:
           type: array
           items:
             type: object
-            required:
-              - id
-              - name
-              - demand_m3
-              - priority_weight
-              - canal_capacity_m3
+            required: [id, name, demand_m3, priority_weight, canal_capacity_m3]
             properties:
-              id:
-                type: string
-              name:
-                type: string
-              demand_m3:
-                type: number
-                minimum: 0.0
-              priority_weight:
-                type: number
-                minimum: 0.0
-                maximum: 1.0
-              canal_capacity_m3:
-                type: number
-                minimum: 0.0
-              minimum_survival_m3:
-                type: number
-                minimum: 0.0
+              id: { type: string }
+              name: { type: string }
+              region: { type: string }
+              demand_m3: { type: number, minimum: 0 }
+              priority_weight: { type: number, exclusiveMinimum: 0, maximum: 1 }
+              canal_capacity_m3: { type: number, minimum: 0 }
+              minimum_survival_m3: { type: number, minimum: 0 }
 
     AllocationSolveResponse:
       type: object
       required:
+        - status
+        - volume_unit
+        - delivery_horizon_hours
         - total_supply_m3
         - total_allocated_m3
+        - total_demand_m3
         - unmet_demand_m3
+        - residual_supply_m3
         - gini_index
+        - gini_note
+        - policy_description
         - allocations
+        - correlation_id
       properties:
-        total_supply_m3:
-          type: number
-        total_allocated_m3:
-          type: number
-        unmet_demand_m3:
-          type: number
-        residual_supply_m3:
-          type: number
-        gini_index:
-          type: number
+        run_id: { type: [string, 'null'] }
+        status: { type: string, enum: [FEASIBLE, ZERO_SUPPLY, ZERO_DEMAND, MINIMUMS_PRORATED] }
+        volume_unit: { type: string, enum: [THOUSAND_M3, M3] }
+        delivery_horizon_hours: { type: integer }
+        total_supply_m3: { type: number }
+        total_allocated_m3: { type: number }
+        total_demand_m3: { type: number }
+        unmet_demand_m3: { type: number }
+        residual_supply_m3: { type: number }
+        gini_index: { type: [number, 'null'] }
+        gini_note: { type: string }
+        policy_description: { type: string }
+        solve_duration_ms: { type: number }
         allocations:
           type: array
           items:
             type: object
+            required: [consumer_id, name, demand_m3, allocated_m3, unmet_m3, satisfaction_pct, reason_code]
             properties:
-              consumer_id:
-                type: string
-              allocated_m3:
-                type: number
-              satisfaction_pct:
-                type: number
-              reason_code:
-                type: string
+              consumer_id: { type: string }
+              name: { type: string }
+              region: { type: string }
+              demand_m3: { type: number }
+              canal_capacity_m3: { type: number }
+              weight: { type: number }
+              allocated_m3: { type: number }
+              unmet_m3: { type: number }
+              satisfaction_pct: { type: [integer, 'null'] }
+              reason_code: { type: string }
+        correlation_id: { type: string }
 
-    IncidentResponse:
+    SavingsEstimateRequest:
+      type: object
+      required: [baseline_flow_m3h, baseline_pressure_bar, post_repair_flow_m3h, post_repair_pressure_bar]
+      properties:
+        baseline_flow_m3h: { type: number, minimum: 0 }
+        baseline_pressure_bar: { type: number, exclusiveMinimum: 0 }
+        post_repair_flow_m3h: { type: number, minimum: 0 }
+        post_repair_pressure_bar: { type: number, exclusiveMinimum: 0 }
+        leakage_exponent: { type: number, minimum: 0.5, maximum: 1.5 }
+        illustrative_tariff_azn_m3: { type: number, minimum: 0 }
+        time_horizon_days: { type: number, exclusiveMinimum: 0 }
+
+    SavingsEstimateResponse:
       type: object
       required:
-        - incident_id
-        - dma_id
-        - state
-        - severity
-        - estimated_loss_m3h
-        - version
+        - normalized_baseline_flow_m3h
+        - pressure_adjusted_hourly_savings_m3h
+        - daily_savings_m3
+        - projected_annual_savings_m3
+        - is_modeled_reduction_positive
+        - model_qualification
+        - disclaimers
+        - correlation_id
       properties:
-        incident_id:
-          type: string
-        dma_id:
-          type: string
-        pipe_segment_id:
-          type: string
-        title:
-          type: string
-        state:
-          type: string
-          enum: [DETECTED, ASSIGNED, IN_REPAIR, REPAIRED, VERIFIED, CLOSED, FALSE_ALARM]
-        severity:
-          type: string
-          enum: [LOW, MEDIUM, CRITICAL, EMERGENCY]
-        estimated_loss_m3h:
-          type: number
-        version:
-          type: integer
+        baseline_flow_m3h: { type: number }
+        baseline_pressure_bar: { type: number }
+        post_repair_flow_m3h: { type: number }
+        post_repair_pressure_bar: { type: number }
+        leakage_exponent: { type: number }
+        normalized_baseline_flow_m3h: { type: number }
+        raw_flow_difference_m3h: { type: number }
+        pressure_adjusted_hourly_savings_m3h: { type: number }
+        daily_savings_m3: { type: number }
+        projected_annual_savings_m3: { type: number }
+        daily_economic_value_azn: { type: number }
+        projected_annual_economic_value_azn: { type: number }
+        illustrative_tariff_azn_m3: { type: number }
+        time_horizon_days: { type: number }
+        is_modeled_reduction_positive: { type: boolean }
+        uncertainty_margin_pct: { type: number }
+        model_qualification: { type: string }
+        disclaimers:
+          type: array
+          items: { type: string }
+        correlation_id: { type: string }
 
-    TransitionRequest:
+    AuditEventResponse:
       type: object
-      required:
-        - event_type
+      required: [audit_id, timestamp, event_type, source_component, severity, actor_id, actor_role, correlation_id, message]
       properties:
-        event_type:
-          type: string
-          enum: [ASSIGN, MARK_FALSE_ALARM, START_REPAIR, RECORD_REPAIR_EVIDENCE, EVALUATE_VERIFICATION, CLOSE]
-        payload:
-          type: object
+        audit_id: { type: string }
+        timestamp: { type: string, format: date-time }
+        event_type: { type: string }
+        source_component: { type: string }
+        severity: { type: string, enum: [INFO, WARN, ERROR, SUCCESS] }
+        actor_id: { type: string }
+        actor_role: { type: string }
+        correlation_id: { type: string }
+        dma_id: { type: [string, 'null'] }
+        incident_id: { type: [string, 'null'] }
+        message: { type: string }
+        metadata: { type: [object, 'null'] }
+
+    OutboxItemResponse:
+      type: object
+      required: [outbox_id, idempotency_key, recipient, severity, status, attempts, max_attempts, created_at]
+      properties:
+        outbox_id: { type: string }
+        idempotency_key: { type: string }
+        incident_id: { type: [string, 'null'] }
+        dma_id: { type: [string, 'null'] }
+        recipient: { type: string }
+        severity: { type: string }
+        status: { type: string, enum: [PENDING, DELIVERED, DEAD_LETTERED] }
+        attempts: { type: integer }
+        max_attempts: { type: integer }
+        last_error: { type: [string, 'null'] }
+        created_at: { type: string, format: date-time }
+        delivered_at: { type: [string, 'null'], format: date-time }
 
     ErrorResponse:
       type: object
-      required:
-        - error_code
-        - message
+      required: [error_code, message, timestamp]
       properties:
-        error_code:
-          type: string
-          example: "GUARD_VIOLATION"
-        message:
-          type: string
-        timestamp:
-          type: string
-          format: date-time
+        error_code: { type: string }
+        message: { type: string }
+        current_version: { type: [integer, 'null'] }
+        correlation_id: { type: string }
+        timestamp: { type: string, format: date-time }

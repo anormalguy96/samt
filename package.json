@@ -1,0 +1,24 @@
+{
+  "name": "samt-monorepo",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SAMT v1.1.0 - Centralized Water Operations Analytics Prototype (React + Node/TS HTTP API + PostgreSQL 16)",
+  "scripts": {
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "db:migrate": "npm --prefix server run db:migrate",
+    "db:seed": "npm --prefix server run db:seed",
+    "dev:server": "npm --prefix server run dev",
+    "dev:web": "npm --prefix prototype run dev",
+    "typecheck": "npm --prefix prototype run typecheck && npm --prefix server run typecheck",
+    "test:unit": "npm --prefix prototype run test",
+    "test:server": "npm --prefix server run test",
+    "test": "npm run test:unit && npm run test:server",
+    "contracts:check": "node scripts/validate-contracts.mjs",
+    "build": "npm --prefix server run build && npm --prefix prototype run build",
+    "benchmark": "npm --prefix server run benchmark",
+    "drill:backup-restore": "node scripts/backup-restore-drill.mjs",
+    "e2e:browser": "node scripts/e2e-browser.mjs"
+  }
+}
